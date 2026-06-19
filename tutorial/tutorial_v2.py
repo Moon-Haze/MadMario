@@ -38,6 +38,7 @@ import torch
 from torch import nn
 from pathlib import Path
 from collections import deque
+from tqdm import tqdm
 import random, datetime, numpy as np
 from skimage import transform
 
@@ -689,9 +690,14 @@ logger = MetricLogger(save_dir)
 episodes = 40000
 
 ### 通过玩游戏的方式，循环训练模型 num_episodes 次
-for e in range(episodes):
+progress_bar = tqdm(range(episodes), desc="训练进度", unit="回合")
+for e in progress_bar:
 
     state, _ = env.reset()
+    ep_reward = 0.0
+    ep_length = 0
+    last_loss = None
+    last_q = None
 
     # 开始游戏！
     while True:
@@ -711,6 +717,11 @@ for e in range(episodes):
 
         # 日志记录
         logger.log_step(reward, loss, q)
+        ep_reward += reward
+        ep_length += 1
+        if loss is not None:
+            last_loss = loss
+            last_q = q
 
         # 更新状态
         state = next_state
@@ -720,6 +731,14 @@ for e in range(episodes):
             break
 
     logger.log_episode()
+    progress_bar.set_postfix({
+        "步数": mario.curr_step,
+        "探索率": f"{mario.exploration_rate:.3f}",
+        "回合奖励": f"{ep_reward:.1f}",
+        "回合长度": ep_length,
+        "损失": "-" if last_loss is None else f"{last_loss:.4f}",
+        "Q值": "-" if last_q is None else f"{last_q:.4f}",
+    })
 
     if e % 20 == 0:
         logger.record(

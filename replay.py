@@ -1,6 +1,7 @@
 import random, datetime
 from pathlib import Path
 
+from tqdm import tqdm
 import gymnasium as gym
 import gym_super_mario_bros
 from gym_super_mario_bros.actions import COMPLEX_MOVEMENT
@@ -34,9 +35,12 @@ logger = MetricLogger(save_dir)
 
 episodes = 100
 
-for e in range(episodes):
+progress_bar = tqdm(range(episodes), desc="回放进度", unit="回合")
+for e in progress_bar:
 
     state, _ = env.reset()
+    ep_reward = 0.0
+    ep_length = 0
 
     while True:
 
@@ -50,6 +54,8 @@ for e in range(episodes):
         mario.cache(state, next_state, action, reward, done)
 
         logger.log_step(reward, None, None)
+        ep_reward += reward
+        ep_length += 1
 
         state = next_state
 
@@ -57,6 +63,13 @@ for e in range(episodes):
             break
 
     logger.log_episode()
+    progress_bar.set_postfix({
+        "步数": mario.curr_step,
+        "探索率": f"{mario.exploration_rate:.3f}",
+        "回合奖励": f"{ep_reward:.1f}",
+        "回合长度": ep_length,
+        "通关": bool(info.get('flag_get', False)),
+    })
 
     if e % 20 == 0:
         logger.record(

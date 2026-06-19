@@ -5,6 +5,7 @@ os.environ["KMP_DUPLICATE_LIB_OK"] = "True"
 
 import gym_super_mario_bros
 import matplotlib.pyplot as plt
+from tqdm import tqdm
 from gym_super_mario_bros.actions import COMPLEX_MOVEMENT
 from gymnasium.wrappers import FrameStackObservation as FrameStack
 from gymnasium.wrappers import GrayscaleObservation as GrayScaleObservation
@@ -50,10 +51,12 @@ ax.axis("off")
 fig.canvas.manager.set_window_title("训练好的 Mario")
 
 try:
-    for episode in range(1, episodes + 1):
+    progress_bar = tqdm(range(1, episodes + 1), desc="播放进度", unit="回合")
+    for episode in progress_bar:
         state, _ = env.reset()
         total_reward = 0.0
         step = 0
+        flag_get = False
 
         while True:
             frame = env.render()
@@ -73,9 +76,15 @@ try:
             step += 1
 
             if done or info.get("flag_get"):
+                flag_get = bool(info.get("flag_get", False))
+                progress_bar.set_postfix({
+                    "步数": step,
+                    "奖励": f"{total_reward:.1f}",
+                    "通关": flag_get,
+                })
                 print(
                     f"第 {episode} 回合结束："
-                    f"步数={step}，奖励={total_reward:.1f}，是否通关={info.get('flag_get', False)}"
+                    f"步数={step}，奖励={total_reward:.1f}，是否通关={flag_get}"
                 )
                 break
 finally:
