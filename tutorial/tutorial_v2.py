@@ -44,10 +44,10 @@ import random, datetime, numpy as np
 from skimage import transform
 
 
-# Gym is an OpenAI toolkit for RL
-import gym
-from gym.spaces import Box
-from gym.wrappers import FrameStack, GrayScaleObservation, TransformObservation
+# Gymnasium is a Farama Foundation toolkit for RL (maintained fork of OpenAI Gym)
+import gymnasium as gym
+from gymnasium.spaces import Box
+from gymnasium.wrappers import FrameStackObservation as FrameStack, GrayscaleObservation as GrayScaleObservation
 
 #NES Emulator for OpenAI Gym
 from nes_py.wrappers import JoypadSpace
@@ -106,7 +106,8 @@ env = JoypadSpace(
 )
 
 env.reset()
-next_state, reward, done, info = env.step(action=0)
+next_state, reward, terminated, truncated, info = env.step(action=0)
+done = terminated or truncated
 print(f'{next_state.shape},\n {reward},\n {done},\n {info}')
 
 
@@ -171,22 +172,34 @@ class SkipFrame(gym.Wrapper):
     def step(self, action):
         """Repeat action, and sum reward"""
         total_reward = 0.0
-        done = False
+        terminated = False
+        truncated = False
         for i in range(self._skip):
             # Accumulate reward and repeat the same action
-            obs, reward, done, info = self.env.step(action)
+            obs, reward, terminated, truncated, info = self.env.step(action)
             total_reward += reward
-            if done:
+            if terminated or truncated:
                 break
-        return obs, total_reward, done, info
+        return obs, total_reward, terminated, truncated, info
+
+
+class NormalizeObservation(gym.ObservationWrapper):
+    """Normalize observations from uint8 [0, 255] to float32 [0, 1]."""
+    def __init__(self, env):
+        super().__init__(env)
+        obs_shape = self.observation_space.shape
+        self.observation_space = Box(low=0.0, high=1.0, shape=obs_shape, dtype=np.float32)
+
+    def observation(self, observation):
+        return np.array(observation, dtype=np.float32) / 255.0
 
 
 # Apply Wrappers to environment
 env = SkipFrame(env, skip=4)
 env = GrayScaleObservation(env, keep_dim=False)
 env = ResizeObservation(env, shape=84)
-env = TransformObservation(env, f=lambda x: x / 255.)
-env = FrameStack(env, num_stack=4)
+env = NormalizeObservation(env)
+env = FrameStack(env, stack_size=4)
 
 
 ######################################################################
@@ -714,7 +727,7 @@ episodes = 40000
 ### for Loop that train the model num_episodes times by playing the game
 for e in range(episodes):
 
-    state = env.reset()
+    state, _ = env.reset()
 
     # Play the game!
     while True:
@@ -723,7 +736,8 @@ for e in range(episodes):
         action = mario.act(state)
 
         # Agent performs action
-        next_state, reward, done, info = env.step(action)
+        next_state, reward, terminated, truncated, info = env.step(action)
+        done = terminated or truncated
 
         # Remember
         mario.cache(state, next_state, action, reward, done)

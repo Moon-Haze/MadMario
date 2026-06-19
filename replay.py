@@ -1,14 +1,14 @@
 import random, datetime
 from pathlib import Path
 
-import gym
+import gymnasium as gym
 import gym_super_mario_bros
-from gym.wrappers import FrameStack, GrayScaleObservation, TransformObservation
+from gymnasium.wrappers import FrameStackObservation as FrameStack, GrayscaleObservation as GrayScaleObservation
 from nes_py.wrappers import JoypadSpace
 
 from metrics import MetricLogger
 from agent import Mario
-from wrappers import ResizeObservation, SkipFrame
+from wrappers import ResizeObservation, SkipFrame, NormalizeObservation
 
 env = gym_super_mario_bros.make('SuperMarioBros-1-1-v0')
 
@@ -21,8 +21,8 @@ env = JoypadSpace(
 env = SkipFrame(env, skip=4)
 env = GrayScaleObservation(env, keep_dim=False)
 env = ResizeObservation(env, shape=84)
-env = TransformObservation(env, f=lambda x: x / 255.)
-env = FrameStack(env, num_stack=4)
+env = NormalizeObservation(env)
+env = FrameStack(env, stack_size=4)
 
 env.reset()
 
@@ -39,7 +39,7 @@ episodes = 100
 
 for e in range(episodes):
 
-    state = env.reset()
+    state, _ = env.reset()
 
     while True:
 
@@ -47,7 +47,8 @@ for e in range(episodes):
 
         action = mario.act(state)
 
-        next_state, reward, done, info = env.step(action)
+        next_state, reward, terminated, truncated, info = env.step(action)
+        done = terminated or truncated
 
         mario.cache(state, next_state, action, reward, done)
 
