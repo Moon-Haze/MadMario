@@ -18,7 +18,7 @@ class ResizeObservation(gym.ObservationWrapper):
 
     def observation(self, observation):
         resize_obs = transform.resize(observation, self.shape)
-        # cast float back to uint8
+        # 将浮点数转回 uint8
         resize_obs *= 255
         resize_obs = resize_obs.astype(np.uint8)
         return resize_obs
@@ -26,17 +26,17 @@ class ResizeObservation(gym.ObservationWrapper):
 
 class SkipFrame(gym.Wrapper):
     def __init__(self, env, skip):
-        """Return only every `skip`-th frame"""
+        """只返回每第 `skip` 帧"""
         super().__init__(env)
         self._skip = skip
 
     def step(self, action):
-        """Repeat action, and sum reward"""
+        """重复执行动作，并累加奖励"""
         total_reward = 0.0
         terminated = False
         truncated = False
         for i in range(self._skip):
-            # Accumulate reward and repeat the same action
+            # 累加奖励，并重复执行同一个动作
             obs, reward, terminated, truncated, info = self.env.step(action)
             total_reward += reward
             if terminated or truncated:
@@ -45,7 +45,7 @@ class SkipFrame(gym.Wrapper):
 
 
 class NormalizeObservation(gym.ObservationWrapper):
-    """Normalize observations from uint8 [0, 255] to float32 [0, 1]."""
+    """将观测从 uint8 [0, 255] 归一化为 float32 [0, 1]。"""
     def __init__(self, env):
         super().__init__(env)
         obs_shape = self.observation_space.shape

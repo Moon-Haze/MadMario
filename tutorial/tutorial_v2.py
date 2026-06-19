@@ -1,37 +1,35 @@
 """
-AI-powered Mario
+AI 驱动的 Mario
 ================
 
-Authors: `Yuansong Feng <https://github.com/YuansongFeng>`__, `Suraj
+作者： `Yuansong Feng <https://github.com/YuansongFeng>`__, `Suraj
 Subramanian <https://github.com/suraj813>`__, `Howard
 Wang <https://github.com/hw26>`__, `Steven
 Guo <https://github.com/GuoYuzhang>`__.
 
-Welcome!
+欢迎！
 --------
 
-This tutorial walks you through the fundamentals of Deep Reinforcement
-Learning. At the end, you will implement an AI-powered Mario (using
-`Double Deep Q-Networks <https://arxiv.org/pdf/1509.06461.pdf>`__) that
-can play the game by itself.
+本教程将带你了解深度强化学习的基础知识。完成本教程后，你将实现一个
+AI 驱动的 Mario（使用 `Double Deep Q-Networks <https://arxiv.org/pdf/1509.06461.pdf>`__），
+让它能够自己玩游戏。
 
-Although no prior knowledge of RL is necessary for this tutorial, you
-can familiarize yourself with these RL
-`concepts <https://spinningup.openai.com/en/latest/spinningup/rl_intro.html>`__,
-and have this handy
-`cheatsheet <https://colab.research.google.com/drive/1eN33dPVtdPViiS1njTW_-r-IYCDTFU7N>`__
-as your companion. The full code is available
-`here <https://github.com/yuansongFeng/MadMario/>`__.
+虽然本教程不要求你具备强化学习（RL）的先验知识，但你可以先熟悉这些 RL
+`概念 <https://spinningup.openai.com/en/latest/spinningup/rl_intro.html>`__，
+并把这份方便的
+`速查表 <https://colab.research.google.com/drive/1eN33dPVtdPViiS1njTW_-r-IYCDTFU7N>`__
+作为参考。完整代码可在
+`这里 <https://github.com/yuansongFeng/MadMario/>`__ 获取。
 
 """
 
 
 ######################################################################
-# Setup
+# 环境设置
 # -----
 #
 
-# Mario game environment
+# Mario 游戏环境
 !pip install gymnasium "gym-super-mario-bros>=9.1.0" scikit-image
 
 import os
@@ -44,57 +42,52 @@ import random, datetime, numpy as np
 from skimage import transform
 
 
-# Gymnasium is a Farama Foundation toolkit for RL (maintained fork of OpenAI Gym)
+# Gymnasium 是 Farama Foundation 维护的强化学习工具包（Gymnasium 的维护分支）
 import gymnasium as gym
 from gymnasium.spaces import Box
 from gymnasium.wrappers import FrameStackObservation as FrameStack, GrayscaleObservation as GrayScaleObservation
 
-# NES Emulator wrapper
+# NES 模拟器包装器
 from nes_py.wrappers import JoypadSpace
 
-# Super Mario environment
+# Super Mario 环境
 import gym_super_mario_bros
 from gym_super_mario_bros.actions import COMPLEX_MOVEMENT
 
 
 ######################################################################
-# RL Definitions
+# 强化学习定义
 # --------------
 #
-# **Environment** The world that an agent interacts with and learns from.
+# **环境（Environment）** 智能体与之交互并从中学习的世界。
 #
-# **Action** :math:`a` : How the Agent responds to the Environment. The
-# set of all possible Actions is called *action-space*.
+# **动作（Action）** :math:`a`：智能体对环境做出的响应。
+# 所有可能动作的集合称为*动作空间（action-space）*。
 #
-# **State** :math:`s` : The current characteristic of the Environment. The
-# set of all possible States the Environment can be in is called
-# *state-space*.
+# **状态（State）** :math:`s`：环境当前的特征。
+# 环境所有可能状态的集合称为*状态空间（state-space）*。
 #
-# **Reward** :math:`r` : Reward is the key feedback from Environment to
-# Agent. It is what drives the Agent to learn and to change its future
-# action. An aggregation of rewards over multiple time steps is called
-# **Return**.
+# **奖励（Reward）** :math:`r`：奖励是环境给予智能体的关键反馈。
+# 它驱动智能体学习并改变未来的动作。多个时间步上的奖励汇总称为
+# **回报（Return）**。
 #
-# **Optimal Action-Value function** :math:`Q^*(s,a)` : Gives the expected
-# return if you start in state :math:`s`, take an arbitrary action
-# :math:`a`, and then for each future time step take the action that
-# maximizes returns. :math:`Q` can be said to stand for the “quality” of
-# the action in a state. We try to approximate this function.
+# **最优动作价值函数（Optimal Action-Value function）** :math:`Q^*(s,a)`：
+# 表示如果你从状态 :math:`s` 开始，采取任意动作 :math:`a`，
+# 之后在每个未来时间步都采取能最大化回报的动作，那么期望回报是多少。
+# 可以说 :math:`Q` 代表某个状态下动作的“质量”。我们会尝试近似这个函数。
 #
 
 
 ######################################################################
-# Initialize Environment
+# 初始化环境
 # ======================
 #
-# In Mario, the environment consists of tubes, mushrooms and other
-# components.
+# 在 Mario 中，环境由管道、蘑菇和其他组件组成。
 #
-# When Mario makes an action, the environment responds with the changed
-# (next) state, reward and other info.
+# 当 Mario 执行动作时，环境会返回变化后的（下一个）状态、奖励以及其他信息。
 #
 
-# Initialize Super Mario environment
+# 初始化 Super Mario 环境
 env = gym_super_mario_bros.make('SuperMarioBros-1-1-v0')
 
 # 使用 gym-super-mario-bros 提供的复杂动作空间
@@ -107,36 +100,29 @@ print(f'{next_state.shape},\n {reward},\n {done},\n {info}')
 
 
 ######################################################################
-# Preprocess Environment
+# 预处理环境
 # ======================
 #
-# Environment data is returned to the agent in ``next_state``. As you saw
-# above, each state is represented by a ``[3, 240, 256]`` size array.
-# Often that is more information than our agent needs; for instance,
-# Mario’s actions do not depend on the color of the pipes or the sky!
+# 环境数据会通过 ``next_state`` 返回给智能体。正如你在上面看到的，
+# 每个状态都由一个大小为 ``[3, 240, 256]`` 的数组表示。通常这包含了
+# 比智能体所需更多的信息；例如，Mario 的动作并不取决于管道或天空的颜色！
 #
-# We use **Wrappers** to preprocess environment data before sending it to
-# the agent.
+# 我们使用**包装器（Wrappers）**在环境数据发送给智能体之前对其进行预处理。
 #
-# ``GrayScaleObservation`` is a common wrapper to transform an RGB image
-# to grayscale; doing so reduces the size of the state representation
-# without losing useful information. Now the size of each state:
-# ``[1, 240, 256]``
+# ``GrayScaleObservation`` 是一个常用包装器，用于将 RGB 图像转换为灰度图；
+# 这样做可以在不丢失有用信息的情况下减小状态表示的大小。
+# 此时每个状态的大小为：``[1, 240, 256]``
 #
-# ``ResizeObservation`` downsamples each observation into a square image.
-# New size: ``[1, 84, 84]``
+# ``ResizeObservation`` 会将每个观测下采样为正方形图像。
+# 新的大小为：``[1, 84, 84]``
 #
-# ``SkipFrame`` is a custom wrapper that inherits from ``gymnasium.Wrapper`` and
-# implements the ``step()`` function. Because consecutive frames don’t
-# vary much, we can skip n-intermediate frames without losing much
-# information. The n-th frame aggregates rewards accumulated over each
-# skipped frame.
+# ``SkipFrame`` 是一个自定义包装器，它继承自 ``gymnasium.Wrapper``，
+# 并实现了 ``step()`` 函数。由于连续帧之间变化不大，我们可以跳过 n 个
+# 中间帧，而不会丢失太多信息。第 n 帧会汇总每个被跳过帧中累计的奖励。
 #
-# ``FrameStack`` is a wrapper that allows us to squash consecutive frames
-# of the environment into a single observation point to feed to our
-# learning model. This way, we can identify if Mario was landing or
-# jumping based on the direction of his movement in the previous several
-# frames.
+# ``FrameStack`` 是一个包装器，允许我们把环境中的连续帧压缩成一个单独的
+# 观测点，并将其输入到学习模型中。这样，我们可以根据前几帧中的运动方向
+# 判断 Mario 是在落地还是跳跃。
 #
 
 class ResizeObservation(gym.ObservationWrapper):
@@ -152,7 +138,7 @@ class ResizeObservation(gym.ObservationWrapper):
 
     def observation(self, observation):
         resize_obs = transform.resize(observation, self.shape)
-        # cast float back to uint8
+        # 将浮点数转回 uint8
         resize_obs *= 255
         resize_obs = resize_obs.astype(np.uint8)
         return resize_obs
@@ -160,17 +146,17 @@ class ResizeObservation(gym.ObservationWrapper):
 
 class SkipFrame(gym.Wrapper):
     def __init__(self, env, skip):
-        """Return only every `skip`-th frame"""
+        """只返回每第 `skip` 帧"""
         super().__init__(env)
         self._skip = skip
 
     def step(self, action):
-        """Repeat action, and sum reward"""
+        """重复执行动作，并累加奖励"""
         total_reward = 0.0
         terminated = False
         truncated = False
         for i in range(self._skip):
-            # Accumulate reward and repeat the same action
+            # 累加奖励，并重复执行同一个动作
             obs, reward, terminated, truncated, info = self.env.step(action)
             total_reward += reward
             if terminated or truncated:
@@ -179,7 +165,7 @@ class SkipFrame(gym.Wrapper):
 
 
 class NormalizeObservation(gym.ObservationWrapper):
-    """Normalize observations from uint8 [0, 255] to float32 [0, 1]."""
+    """将观测从 uint8 [0, 255] 归一化为 float32 [0, 1]。"""
     def __init__(self, env):
         super().__init__(env)
         obs_shape = self.observation_space.shape
@@ -189,7 +175,7 @@ class NormalizeObservation(gym.ObservationWrapper):
         return np.array(observation, dtype=np.float32) / 255.0
 
 
-# Apply Wrappers to environment
+# 将包装器应用到环境
 env = SkipFrame(env, skip=4)
 env = GrayScaleObservation(env, keep_dim=False)
 env = ResizeObservation(env, shape=84)
@@ -198,34 +184,29 @@ env = FrameStack(env, stack_size=4)
 
 
 ######################################################################
-# After applying the above wrappers to the environment, the final wrapped
-# state consists of 4 gray-scaled consecutive frames stacked together, as
-# shown above in the image on the left. Each time Mario makes an action,
-# the environment responds with a state of this structure. The structure
-# is represented by a 3-D array of size ``[4, 84, 84]``.
+# 将上述包装器应用到环境之后，最终包装后的状态由 4 个连续的灰度帧堆叠而成，
+# 如上方左侧图片所示。每当 Mario 执行动作时，环境都会返回一个具有这种结构的状态。
+# 该结构由一个大小为 ``[4, 84, 84]`` 的三维数组表示。
 #
 # .. figure:: https://drive.google.com/uc?id=1zZU63qsuOKZIOwWt94z6cegOF2SMEmvD
-#    :alt: picture
+#    :alt: 图片
 #
-#    picture
+#    图片
 #
 
 
 ######################################################################
-# Agent
+# 智能体
 # =====
 #
-# We create a class ``Mario`` to represent our agent in the game. Mario
-# should be able to:
+# 我们创建一个 ``Mario`` 类来表示游戏中的智能体。Mario 应该能够：
 #
-# -  **Act** according to the optimal action policy based on the current
-#    state (of the environment).
+# - 根据当前（环境）状态，按照最优动作策略进行**行动**。
 #
-# -  **Remember** experiences. Experience = (current state, current
-#    action, reward, next state). Mario *caches* and later *recalls* his
-#    experiences to update his action policy.
+# - **记住**经验。经验 =（当前状态、当前动作、奖励、下一个状态）。
+#   Mario 会*缓存*自己的经验，并在之后*回忆*这些经验来更新动作策略。
 #
-# -  **Learn** a better action policy over time
+# - 随着时间推移**学习**出更好的动作策略
 #
 
 class Mario:
@@ -233,38 +214,36 @@ class Mario:
         pass
 
     def act(self, state):
-        """Given a state, choose an epsilon-greedy action"""
+        """给定一个状态，选择一个 epsilon-greedy 动作"""
         pass
 
     def cache(self, experience):
-        """Add the experience to memory"""
+        """将经验添加到记忆中"""
         pass
 
     def recall(self):
-        """Sample experiences from memory"""
+        """从记忆中采样经验"""
         pass
 
     def learn(self):
-        """Update online action value (Q) function with a batch of experiences"""
+        """使用一批经验更新在线动作价值（Q）函数"""
         pass
 
 
 ######################################################################
-# In the following sections, we will populate Mario’s parameters and
-# define his functions.
+# 在接下来的章节中，我们将填充 Mario 的参数并定义它的函数。
 #
 
 
 ######################################################################
-# Act
+# 行动
 # ===
 #
-# For any given state, an agent can choose to do the most optimal action
-# (**exploit**) or a random action (**explore**).
+# 对于任意给定状态，智能体可以选择执行最优动作（**利用 exploit**），
+# 也可以选择随机动作（**探索 explore**）。
 #
-# Mario randomly explores with a chance of ``self.exploration_rate``; when
-# he chooses to exploit, he relies on ``MarioNet`` (implemented in
-# ``Learn`` section) to provide the most optimal action.
+# Mario 会以 ``self.exploration_rate`` 的概率进行随机探索；当它选择利用时，
+# 会依赖 ``MarioNet``（在``学习``章节中实现）来给出最优动作。
 #
 
 class Mario:
@@ -275,7 +254,7 @@ class Mario:
 
     self.use_cuda = torch.cuda.is_available()
 
-    # Mario's DNN to predict the most optimal action - we implement this in the Learn section
+    # Mario 用于预测最优动作的深度神经网络
     self.net = MarioNet(self.state_dim, self.action_dim).float()
     if self.use_cuda:
       self.net = self.net.to(device='cuda')
@@ -285,55 +264,53 @@ class Mario:
     self.exploration_rate_min = 0.1
     self.curr_step = 0
 
-    self.save_every = 5e5   # no. of experiences between saving Mario Net
+    self.save_every = 5e5   # 每隔多少条经验保存一次 MarioNet
 
 
   def act(self, state):
     """
-    Given a state, choose an epsilon-greedy action and update value of step.
+    给定一个状态，选择一个 epsilon-greedy 动作，并更新步数。
 
-    Inputs:
-    state(LazyFrame): A single observation of the current state, dimension is (state_dim)
-    Outputs:
-    action_idx (int): An integer representing which action Mario will perform
+    输入：
+    state(LazyFrame)：当前状态的一次观测，维度为 (state_dim)
+    输出：
+    action_idx (int)：表示 Mario 将执行哪个动作的整数
     """
-    # EXPLORE
+    # 探索
     if np.random.rand() < self.exploration_rate:
         action_idx = np.random.randint(self.action_dim)
 
-    # EXPLOIT
+    # 利用
     else:
         state = torch.FloatTensor(state).cuda() if self.use_cuda else torch.FloatTensor(state)
         state = state.unsqueeze(0)
         action_values = self.net(state, model='online')
         action_idx = torch.argmax(action_values, axis=1).item()
 
-    # decrease exploration_rate
+    # 降低 exploration_rate
     self.exploration_rate *= self.exploration_rate_decay
     self.exploration_rate = max(self.exploration_rate_min, self.exploration_rate)
 
-    # increment step
+    # 递增 step
     self.curr_step += 1
     return action_idx
 
 
 
 ######################################################################
-# Cache and Recall
+# 缓存与回忆
 # ================
 #
-# These two functions serve as Mario’s “memory” process.
+# 这两个函数构成了 Mario 的“记忆”过程。
 #
-# ``cache()``: Each time Mario performs an action, he stores the
-# ``experience`` to his memory. His experience includes the current
-# *state*, *action* performed, *reward* from the action, the *next state*,
-# and whether the game is *done*.
+# ``cache()``：每当 Mario 执行一个动作时，它都会把 ``experience`` 存入自己的记忆中。
+# 它的经验包括当前*状态*、执行的*动作*、该动作带来的*奖励*、*下一个状态*，
+# 以及游戏是否已经*结束*。
 #
-# ``recall()``: Mario randomly samples a batch of experiences from his
-# memory, and uses that to learn the game.
+# ``recall()``：Mario 会从记忆中随机采样一批经验，并利用这些经验来学习游戏。
 #
 
-class Mario(Mario): # subclassing for continuity
+class Mario(Mario): # 通过继承保持教程代码的连续性
   def __init__(self, state_dim, action_dim, save_dir):
     super().__init__(state_dim, action_dim, save_dir)
     self.memory = deque(maxlen=100000)
@@ -342,9 +319,9 @@ class Mario(Mario): # subclassing for continuity
 
   def cache(self, state, next_state, action, reward, done):
     """
-    Store the experience to self.memory (replay buffer)
+    将经验存储到 self.memory（经验回放缓冲区）中
 
-    Inputs:
+    输入：
     state (LazyFrame),
     next_state (LazyFrame),
     action (int),
@@ -362,7 +339,7 @@ class Mario(Mario): # subclassing for continuity
 
   def recall(self):
     """
-    Retrieve a batch of experiences from memory
+    从记忆中取回一批经验
     """
     batch = random.sample(self.memory, self.batch_size)
     state, next_state, action, reward, done = map(torch.stack, zip(*batch))
@@ -370,40 +347,37 @@ class Mario(Mario): # subclassing for continuity
 
 
 ######################################################################
-# Learn
+# 学习
 # =====
 #
-# Mario uses the `DDQN algorithm <https://arxiv.org/pdf/1509.06461>`__
-# under the hood. DDQN uses two ConvNets - :math:`Q_{online}` and
-# :math:`Q_{target}` - that independently approximate the optimal
-# action-value function.
+# Mario 底层使用 `DDQN 算法 <https://arxiv.org/pdf/1509.06461>`__。
+# DDQN 使用两个卷积网络——:math:`Q_{online}` 和 :math:`Q_{target}`——
+# 它们各自独立地近似最优动作价值函数。
 #
-# In our implementation, we share feature generator ``features`` across
-# :math:`Q_{online}` and :math:`Q_{target}`, but maintain separate FC
-# classifiers for each. :math:`\theta_{target}` (the parameters of
-# :math:`Q_{target}`) is frozen to prevent updation by backprop. Instead,
-# it is periodically synced with :math:`\theta_{online}` (more on this
-# later).
+# 在我们的实现中，:math:`Q_{online}` 和 :math:`Q_{target}` 共享特征生成器
+# ``features``，但分别维护独立的全连接分类器。
+# :math:`\theta_{target}`（:math:`Q_{target}` 的参数）被冻结，以防止通过
+# 反向传播更新。相反，它会周期性地与 :math:`\theta_{online}` 同步（稍后会详细说明）。
 #
 
 
 ######################################################################
-# Neural Network
+# 神经网络
 # ~~~~~~~~~~~~~~
 #
 
 class MarioNet(nn.Module):
-  '''mini cnn structure
-  input -> (conv2d + relu) x 3 -> flatten -> (dense + relu) x 2 -> output
+  '''迷你 CNN 结构
+  输入 -> (conv2d + relu) x 3 -> 展平 -> (dense + relu) x 2 -> 输出
   '''
   def __init__(self, input_dim, output_dim):
       super().__init__()
       c, h, w = input_dim
 
       if h != 84:
-          raise ValueError(f"Expecting input height: 84, got: {h}")
+          raise ValueError(f"期望输入高度为: 84, 实际为: {h}")
       if w != 84:
-          raise ValueError(f"Expecting input width: 84, got: {w}")
+          raise ValueError(f"期望输入宽度为: 84, 实际为: {w}")
 
       self.online = nn.Sequential(
           nn.Conv2d(in_channels=c, out_channels=32, kernel_size=8, stride=4),
@@ -420,7 +394,7 @@ class MarioNet(nn.Module):
 
       self.target = copy.deepcopy(self.online)
 
-      # Q_target parameters are frozen.
+      # 冻结 Q_target 的参数。
       for p in self.target.parameters():
           p.requires_grad = False
 
@@ -432,21 +406,20 @@ class MarioNet(nn.Module):
 
 
 ######################################################################
-# TD Estimate & TD Target
+# TD 估计与 TD 目标
 # -----------------------
 #
-# Two values are involved in learning:
+# 学习过程中涉及两个值：
 #
-# **TD Estimate** - the predicted optimal :math:`Q^*` for a given state
-# :math:`s`
+# **TD 估计（TD Estimate）**——给定状态 :math:`s` 下预测的最优 :math:`Q^*`
 #
 # .. math::
 #
 #
 #    {TD}_e = Q_{online}^*(s,a)
 #
-# **TD Target** - aggregation of current reward and the estimated
-# :math:`Q^*` in the next state :math:`s'`
+# **TD 目标（TD Target）**——当前奖励与下一个状态 :math:`s'` 中估计的
+# :math:`Q^*` 的聚合
 #
 # .. math::
 #
@@ -458,14 +431,12 @@ class MarioNet(nn.Module):
 #
 #    {TD}_t = r + \gamma Q_{target}^*(s',a')
 #
-# Because we don’t know what next action :math:`a'` will be, we use the
-# action :math:`a'` maximizes :math:`Q_{online}` in the next state
-# :math:`s'`.
+# 因为我们不知道下一个动作 :math:`a'` 会是什么，所以使用在下一个状态
+# :math:`s'` 中能使 :math:`Q_{online}` 最大的动作 :math:`a'`。
 #
-# Notice we use the
+# 注意，我们在 ``td_target()`` 上使用了
 # [@torch.no_grad()](https://pytorch.org/docs/stable/generated/torch.no_grad.html#no-grad)
-# decorator on ``td_target()`` to disable gradient calculations here
-# (because we don’t need to backpropagate on :math:`\theta_{target}`).
+# 装饰器，以在这里禁用梯度计算（因为我们不需要对 :math:`\theta_{target}` 进行反向传播）。
 #
 
 class Mario(Mario):
@@ -486,22 +457,20 @@ class Mario(Mario):
 
 
 ######################################################################
-# Updating the model
+# 更新模型
 # ------------------
 #
-# As Mario samples inputs from his replay buffer, we compute :math:`TD_t`
-# and :math:`TD_e` and backpropagate this loss down :math:`Q_{online}` to
-# update its parameters :math:`\theta_{online}` (:math:`\alpha` is the
-# learning rate ``lr`` passed to the ``Adam optimizer``)
+# 当 Mario 从回放缓冲区中采样输入时，我们计算 :math:`TD_t` 和 :math:`TD_e`，
+# 并将该损失通过 :math:`Q_{online}` 反向传播，以更新其参数
+# :math:`\theta_{online}`（:math:`\alpha` 是传给 ``Adam optimizer`` 的学习率 ``lr``）
 #
 # .. math::
 #
 #
 #    \theta_{online} \leftarrow \theta_{online} + \alpha \nabla(TD_e - TD_t)
 #
-#  :math:`\theta_{target}` does not update through backpropagation.
-# Instead, we periodically copy :math:`\theta_{online}` to
-# :math:`\theta_{target}`
+# :math:`\theta_{target}` 不会通过反向传播更新。
+# 相反，我们会周期性地将 :math:`\theta_{online}` 复制到 :math:`\theta_{target}`
 #
 # .. math::
 #
@@ -528,7 +497,7 @@ class Mario(Mario):
 
 
 ######################################################################
-# Save checkpoint
+# 保存检查点
 # ---------------
 #
 
@@ -542,20 +511,20 @@ class Mario(Mario):
             ),
             save_path
         )
-        print(f"MarioNet saved to {save_path} at step {self.curr_step}")
+        print(f"MarioNet 已保存到 {save_path} 位于步数 {self.curr_step}")
 
 
 ######################################################################
-# Putting it all together
+# 整合起来
 # -----------------------
 #
 
 class Mario(Mario):
     def __init__(self, state_dim, action_dim, save_dir):
         super().__init__(state_dim, action_dim, save_dir)
-        self.burnin = 1e5  # min. experiences before training
-        self.learn_every = 3   # no. of experiences between updates to Q_online
-        self.sync_every = 1e4   # no. of experiences between Q_target & Q_online sync
+        self.burnin = 1e5  # 训练前至少需要收集的经验数量
+        self.learn_every = 3   # 每隔多少条经验更新一次 Q_online
+        self.sync_every = 1e4   # 每隔多少条经验同步一次 Q_target 和 Q_online
 
 
     def learn(self):
@@ -571,16 +540,16 @@ class Mario(Mario):
       if self.curr_step % self.learn_every != 0:
           return None, None
 
-      # Sample from memory
+      # 从记忆中采样
       state, next_state, action, reward, done = self.recall()
 
-      # Get TD Estimate
+      # 获取 TD 估计
       td_est = self.td_estimate(state, action)
 
-      # Get TD Target
+      # 获取 TD 目标
       td_tgt = self.td_target(reward, next_state, done)
 
-      # Backpropagate loss through Q_online
+      # 通过 Q_online 反向传播损失
       loss = self.update_Q_online(td_est, td_tgt)
 
       return (td_est.mean().item(), loss)
@@ -588,7 +557,7 @@ class Mario(Mario):
 
 
 ######################################################################
-# Logging
+# 日志记录
 # =======
 #
 
@@ -601,31 +570,31 @@ class MetricLogger():
         self.save_log = save_dir / "log"
         with open(self.save_log, "w") as f:
             f.write(
-                f"{'Episode':>8}{'Step':>8}{'Epsilon':>10}{'MeanReward':>15}"
-                f"{'MeanLength':>15}{'MeanLoss':>15}{'MeanQValue':>15}"
-                f"{'TimeDelta':>15}{'Time':>20}\n"
+                f"{'回合':>8}{'步数':>8}{'探索率':>10}{'平均奖励':>15}"
+                f"{'平均长度':>15}{'平均损失':>15}{'平均Q值':>15}"
+                f"{'时间间隔':>15}{'时间':>20}\n"
             )
         self.ep_rewards_plot = save_dir / "reward_plot.jpg"
         self.ep_lengths_plot = save_dir / "length_plot.jpg"
         self.ep_avg_losses_plot = save_dir / "loss_plot.jpg"
         self.ep_avg_qs_plot = save_dir / "q_plot.jpg"
 
-        # History metrics
+        # 历史指标
         self.ep_rewards = []
         self.ep_lengths = []
         self.ep_avg_losses = []
         self.ep_avg_qs = []
 
-        # Moving averages, added for every call to record()
+        # 移动平均值，每次调用 record() 时都会追加
         self.moving_avg_ep_rewards = []
         self.moving_avg_ep_lengths = []
         self.moving_avg_ep_avg_losses = []
         self.moving_avg_ep_avg_qs = []
 
-        # Current episode metric
+        # 当前回合指标
         self.init_episode()
 
-        # Timing
+        # 计时
         self.record_time = time.time()
 
 
@@ -638,7 +607,7 @@ class MetricLogger():
             self.curr_ep_loss_length += 1
 
     def log_episode(self):
-        "Mark end of episode"
+        "记录一个回合的结束"
         self.ep_rewards.append(self.curr_ep_reward)
         self.ep_lengths.append(self.curr_ep_length)
         if self.curr_ep_loss_length == 0:
@@ -675,15 +644,15 @@ class MetricLogger():
         time_since_last_record = np.round(self.record_time - last_record_time, 3)
 
         print(
-            f"Episode {episode} - "
-            f"Step {step} - "
+            f"回合 {episode} - "
+            f"步数 {step} - "
             f"Epsilon {epsilon} - "
-            f"Mean Reward {mean_ep_reward} - "
-            f"Mean Length {mean_ep_length} - "
-            f"Mean Loss {mean_ep_loss} - "
-            f"Mean Q Value {mean_ep_q} - "
-            f"Time Delta {time_since_last_record} - "
-            f"Time {datetime.datetime.now().strftime('%Y-%m-%dT%H:%M:%S')}"
+            f"平均奖励 {mean_ep_reward} - "
+            f"平均长度 {mean_ep_length} - "
+            f"平均损失 {mean_ep_loss} - "
+            f"平均 Q 值 {mean_ep_q} - "
+            f"时间间隔 {time_since_last_record} - "
+            f"时间 {datetime.datetime.now().strftime('%Y-%m-%dT%H:%M:%S')}"
         )
 
         with open(self.save_log, "a") as f:
@@ -702,12 +671,12 @@ class MetricLogger():
 
 
 ######################################################################
-# Let’s play!
+# 开始玩吧！
 # ===========
 #
 
 use_cuda = torch.cuda.is_available()
-print(f"Using CUDA: {use_cuda}")
+print(f"使用 CUDA： {use_cuda}")
 print()
 
 save_dir = Path('checkpoints') / datetime.datetime.now().strftime('%Y-%m-%dT%H-%M-%S')
@@ -719,34 +688,34 @@ logger = MetricLogger(save_dir)
 
 episodes = 40000
 
-### for Loop that train the model num_episodes times by playing the game
+### 通过玩游戏的方式，循环训练模型 num_episodes 次
 for e in range(episodes):
 
     state, _ = env.reset()
 
-    # Play the game!
+    # 开始游戏！
     while True:
 
-        # Run agent on the state
+        # 让智能体基于当前状态运行
         action = mario.act(state)
 
-        # Agent performs action
+        # 智能体执行动作
         next_state, reward, terminated, truncated, info = env.step(action)
         done = terminated or truncated
 
-        # Remember
+        # 记住经验
         mario.cache(state, next_state, action, reward, done)
 
-        # Learn
+        # 学习
         q, loss = mario.learn()
 
-        # Logging
+        # 日志记录
         logger.log_step(reward, loss, q)
 
-        # Update state
+        # 更新状态
         state = next_state
 
-        # Check if end of game
+        # 检查游戏是否结束
         if done or info['flag_get']:
             break
 

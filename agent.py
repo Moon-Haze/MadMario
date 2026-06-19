@@ -19,17 +19,17 @@ class Mario:
         self.gamma = 0.9
 
         self.curr_step = 0
-        self.burnin = 1e5  # min. experiences before training
-        self.learn_every = 3   # no. of experiences between updates to Q_online
-        self.sync_every = 1e4   # no. of experiences between Q_target & Q_online sync
+        self.burnin = 1e5  # 训练前至少需要收集的经验数量
+        self.learn_every = 3   # 每隔多少条经验更新一次 Q_online
+        self.sync_every = 1e4   # 每隔多少条经验同步一次 Q_target 和 Q_online
 
-        self.save_every = 5e5   # no. of experiences between saving Mario Net
+        self.save_every = 5e5   # 每隔多少条经验保存一次 MarioNet
         self.save_dir = save_dir
 
         self.use_cuda = torch.cuda.is_available()
         self.device = torch.device('cuda' if self.use_cuda else 'cpu')
 
-        # Mario's DNN to predict the most optimal action - we implement this in the Learn section
+        # Mario 用于预测最优动作的深度神经网络
         self.net = MarioNet(self.state_dim, self.action_dim).float().to(self.device)
         if checkpoint:
             self.load(checkpoint)
@@ -40,37 +40,37 @@ class Mario:
 
     def act(self, state):
         """
-        Given a state, choose an epsilon-greedy action and update value of step.
+        给定一个状态，选择一个 epsilon-greedy 动作，并更新步数。
 
-        Inputs:
-        state(LazyFrame): A single observation of the current state, dimension is (state_dim)
-        Outputs:
-        action_idx (int): An integer representing which action Mario will perform
+        输入：
+        state(LazyFrame)：当前状态的一次观测，维度为 (state_dim)
+        输出：
+        action_idx (int)：表示 Mario 将执行哪个动作的整数
         """
-        # EXPLORE
+        # 探索
         if np.random.rand() < self.exploration_rate:
             action_idx = np.random.randint(self.action_dim)
 
-        # EXPLOIT
+        # 利用
         else:
             state = torch.as_tensor(state, dtype=torch.float32, device=self.device).unsqueeze(0)
             with torch.no_grad():
                 action_values = self.net(state, model='online')
             action_idx = torch.argmax(action_values, axis=1).item()
 
-        # decrease exploration_rate
+        # 降低 exploration_rate
         self.exploration_rate *= self.exploration_rate_decay
         self.exploration_rate = max(self.exploration_rate_min, self.exploration_rate)
 
-        # increment step
+        # 递增 step
         self.curr_step += 1
         return action_idx
 
     def cache(self, state, next_state, action, reward, done):
         """
-        Store the experience to self.memory (replay buffer)
+        将经验存储到 self.memory（经验回放缓冲区）中
 
-        Inputs:
+        输入：
         state (LazyFrame),
         next_state (LazyFrame),
         action (int),
@@ -85,7 +85,7 @@ class Mario:
 
     def recall(self):
         """
-        Retrieve a batch of experiences from memory
+        从记忆中取回一批经验
         """
         batch = random.sample(self.memory, self.batch_size)
         state, next_state, action, reward, done = zip(*batch)
@@ -135,16 +135,16 @@ class Mario:
         if self.curr_step % self.learn_every != 0:
             return None, None
 
-        # Sample from memory
+        # 从记忆中采样
         state, next_state, action, reward, done = self.recall()
 
-        # Get TD Estimate
+        # 获取 TD 估计
         td_est = self.td_estimate(state, action)
 
-        # Get TD Target
+        # 获取 TD 目标
         td_tgt = self.td_target(reward, next_state, done)
 
-        # Backpropagate loss through Q_online
+        # 通过 Q_online 反向传播损失
         loss = self.update_Q_online(td_est, td_tgt)
 
         return (td_est.mean().item(), loss)
@@ -159,17 +159,17 @@ class Mario:
             ),
             save_path
         )
-        print(f"MarioNet saved to {save_path} at step {self.curr_step}")
+        print(f"MarioNet 已保存到 {save_path} 位于步数 {self.curr_step}")
 
 
     def load(self, load_path):
         if not load_path.exists():
-            raise ValueError(f"{load_path} does not exist")
+            raise ValueError(f"{load_path} 不存在")
 
         ckp = torch.load(load_path, map_location=('cuda' if self.use_cuda else 'cpu'))
         exploration_rate = ckp.get('exploration_rate')
         state_dict = ckp.get('model')
 
-        print(f"Loading model at {load_path} with exploration rate {exploration_rate}")
+        print(f"正在加载模型 {load_path} ，探索率为 {exploration_rate}")
         self.net.load_state_dict(state_dict)
         self.exploration_rate = exploration_rate

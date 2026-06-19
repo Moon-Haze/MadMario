@@ -7,31 +7,31 @@ class MetricLogger():
         self.save_log = save_dir / "log"
         with open(self.save_log, "w") as f:
             f.write(
-                f"{'Episode':>8}{'Step':>8}{'Epsilon':>10}{'MeanReward':>15}"
-                f"{'MeanLength':>15}{'MeanLoss':>15}{'MeanQValue':>15}"
-                f"{'TimeDelta':>15}{'Time':>20}\n"
+                f"{'回合':>8}{'步数':>8}{'探索率':>10}{'平均奖励':>15}"
+                f"{'平均长度':>15}{'平均损失':>15}{'平均Q值':>15}"
+                f"{'时间间隔':>15}{'时间':>20}\n"
             )
         self.ep_rewards_plot = save_dir / "reward_plot.jpg"
         self.ep_lengths_plot = save_dir / "length_plot.jpg"
         self.ep_avg_losses_plot = save_dir / "loss_plot.jpg"
         self.ep_avg_qs_plot = save_dir / "q_plot.jpg"
 
-        # History metrics
+        # 历史指标
         self.ep_rewards = []
         self.ep_lengths = []
         self.ep_avg_losses = []
         self.ep_avg_qs = []
 
-        # Moving averages, added for every call to record()
+        # 移动平均值，每次调用 record() 时都会追加
         self.moving_avg_ep_rewards = []
         self.moving_avg_ep_lengths = []
         self.moving_avg_ep_avg_losses = []
         self.moving_avg_ep_avg_qs = []
 
-        # Current episode metric
+        # 当前回合指标
         self.init_episode()
 
-        # Timing
+        # 计时
         self.record_time = time.time()
 
 
@@ -44,7 +44,7 @@ class MetricLogger():
             self.curr_ep_loss_length += 1
 
     def log_episode(self):
-        "Mark end of episode"
+        "记录一个回合的结束"
         self.ep_rewards.append(self.curr_ep_reward)
         self.ep_lengths.append(self.curr_ep_length)
         if self.curr_ep_loss_length == 0:
@@ -81,15 +81,15 @@ class MetricLogger():
         time_since_last_record = np.round(self.record_time - last_record_time, 3)
 
         print(
-            f"Episode {episode} - "
-            f"Step {step} - "
+            f"回合 {episode} - "
+            f"步数 {step} - "
             f"Epsilon {epsilon} - "
-            f"Mean Reward {mean_ep_reward} - "
-            f"Mean Length {mean_ep_length} - "
-            f"Mean Loss {mean_ep_loss} - "
-            f"Mean Q Value {mean_ep_q} - "
-            f"Time Delta {time_since_last_record} - "
-            f"Time {datetime.datetime.now().strftime('%Y-%m-%dT%H:%M:%S')}"
+            f"平均奖励 {mean_ep_reward} - "
+            f"平均长度 {mean_ep_length} - "
+            f"平均损失 {mean_ep_loss} - "
+            f"平均 Q 值 {mean_ep_q} - "
+            f"时间间隔 {time_since_last_record} - "
+            f"时间 {datetime.datetime.now().strftime('%Y-%m-%dT%H:%M:%S')}"
         )
 
         with open(self.save_log, "a") as f:

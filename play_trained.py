@@ -19,7 +19,7 @@ from wrappers import NormalizeObservation, ResizeObservation, SkipFrame
 env = gym_super_mario_bros.make("SuperMarioBros-1-1-v0", render_mode="rgb_array")
 
 # 动作空间必须和训练时保持一致。
-# 注意：这里使用 COMPLEX_MOVEMENT 后，旧的 trained_mario.chkpt（2 动作）不能直接加载。
+# 注意：这里使用 COMPLEX_MOVEMENT 后，旧的 trained_mario.chkpt（2 动作检查点）不能直接加载。
 env = JoypadSpace(env, COMPLEX_MOVEMENT)
 
 # 观测预处理必须和训练时保持一致
@@ -47,7 +47,7 @@ plt.ion()
 fig, ax = plt.subplots()
 image = None
 ax.axis("off")
-fig.canvas.manager.set_window_title("Trained Mario")
+fig.canvas.manager.set_window_title("训练好的 Mario")
 
 try:
     for episode in range(1, episodes + 1):
