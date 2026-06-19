@@ -6,6 +6,7 @@ from pathlib import Path
 
 import gymnasium as gym
 import gym_super_mario_bros
+from gym_super_mario_bros.actions import COMPLEX_MOVEMENT
 from gymnasium.wrappers import FrameStackObservation as FrameStack, GrayscaleObservation as GrayScaleObservation
 from nes_py.wrappers import JoypadSpace
 
@@ -16,14 +17,9 @@ from wrappers import ResizeObservation, SkipFrame, NormalizeObservation
 # 初始化超级马里奥游戏环境，这里选择 1-1 关卡
 env = gym_super_mario_bros.make('SuperMarioBros-1-1-v0')
 
-# Limit the action-space to
-#   0. walk right
-#   1. jump right
-env = JoypadSpace(
-    env,
-    [['right'],
-    ['right', 'A']]
-)
+# 使用更复杂的动作空间重新训练更强的 Mario。
+# 注意：动作数量变化后，旧的 2 动作 checkpoint 不能直接加载。
+env = JoypadSpace(env, COMPLEX_MOVEMENT)
 
 # 对环境观测做预处理：跳帧、灰度化、缩放、归一化，并堆叠最近 4 帧作为状态
 env = SkipFrame(env, skip=4)

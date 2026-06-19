@@ -3,6 +3,7 @@ from pathlib import Path
 
 import gymnasium as gym
 import gym_super_mario_bros
+from gym_super_mario_bros.actions import COMPLEX_MOVEMENT
 from gymnasium.wrappers import FrameStackObservation as FrameStack, GrayscaleObservation as GrayScaleObservation
 from nes_py.wrappers import JoypadSpace
 
@@ -12,11 +13,7 @@ from wrappers import ResizeObservation, SkipFrame, NormalizeObservation
 
 env = gym_super_mario_bros.make('SuperMarioBros-1-1-v0')
 
-env = JoypadSpace(
-    env,
-    [['right'],
-    ['right', 'A']]
-)
+env = JoypadSpace(env, COMPLEX_MOVEMENT)
 
 env = SkipFrame(env, skip=4)
 env = GrayScaleObservation(env, keep_dim=False)

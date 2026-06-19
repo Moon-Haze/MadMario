@@ -54,6 +54,7 @@ from nes_py.wrappers import JoypadSpace
 
 # Super Mario environment
 import gym_super_mario_bros
+from gym_super_mario_bros.actions import COMPLEX_MOVEMENT
 
 
 ######################################################################
@@ -96,14 +97,8 @@ import gym_super_mario_bros
 # Initialize Super Mario environment
 env = gym_super_mario_bros.make('SuperMarioBros-1-1-v0')
 
-# Limit the action-space to
-#   0. walk right
-#   1. jump right
-env = JoypadSpace(
-    env,
-    [['right'],
-    ['right', 'A']]
-)
+# 使用 gym-super-mario-bros 提供的复杂动作空间
+env = JoypadSpace(env, COMPLEX_MOVEMENT)
 
 env.reset()
 next_state, reward, terminated, truncated, info = env.step(action=0)
