@@ -27,11 +27,10 @@ class Mario:
         self.save_dir = save_dir
 
         self.use_cuda = torch.cuda.is_available()
+        self.device = torch.device('cuda' if self.use_cuda else 'cpu')
 
         # Mario's DNN to predict the most optimal action - we implement this in the Learn section
-        self.net = MarioNet(self.state_dim, self.action_dim).float()
-        if self.use_cuda:
-            self.net = self.net.to(device='cuda')
+        self.net = MarioNet(self.state_dim, self.action_dim).float().to(self.device)
         if checkpoint:
             self.load(checkpoint)
 
@@ -54,9 +53,9 @@ class Mario:
 
         # EXPLOIT
         else:
-            state = torch.FloatTensor(state).cuda() if self.use_cuda else torch.FloatTensor(state)
-            state = state.unsqueeze(0)
-            action_values = self.net(state, model='online')
+            state = torch.as_tensor(state, dtype=torch.float32, device=self.device).unsqueeze(0)
+            with torch.no_grad():
+                action_values = self.net(state, model='online')
             action_idx = torch.argmax(action_values, axis=1).item()
 
         # decrease exploration_rate
@@ -78,11 +77,8 @@ class Mario:
         reward (float),
         done(bool))
         """
-        state = torch.FloatTensor(state).cuda() if self.use_cuda else torch.FloatTensor(state)
-        next_state = torch.FloatTensor(next_state).cuda() if self.use_cuda else torch.FloatTensor(next_state)
-        action = torch.LongTensor([action]).cuda() if self.use_cuda else torch.LongTensor([action])
-        reward = torch.DoubleTensor([reward]).cuda() if self.use_cuda else torch.DoubleTensor([reward])
-        done = torch.BoolTensor([done]).cuda() if self.use_cuda else torch.BoolTensor([done])
+        state = np.array(state, copy=True)
+        next_state = np.array(next_state, copy=True)
 
         self.memory.append( (state, next_state, action, reward, done,) )
 
@@ -92,8 +88,13 @@ class Mario:
         Retrieve a batch of experiences from memory
         """
         batch = random.sample(self.memory, self.batch_size)
-        state, next_state, action, reward, done = map(torch.stack, zip(*batch))
-        return state, next_state, action.squeeze(), reward.squeeze(), done.squeeze()
+        state, next_state, action, reward, done = zip(*batch)
+        state = torch.as_tensor(np.array(state), dtype=torch.float32, device=self.device)
+        next_state = torch.as_tensor(np.array(next_state), dtype=torch.float32, device=self.device)
+        action = torch.as_tensor(action, dtype=torch.long, device=self.device)
+        reward = torch.as_tensor(reward, dtype=torch.float32, device=self.device)
+        done = torch.as_tensor(done, dtype=torch.bool, device=self.device)
+        return state, next_state, action, reward, done
 
 
     def td_estimate(self, state, action):

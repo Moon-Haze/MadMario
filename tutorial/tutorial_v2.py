@@ -32,7 +32,7 @@ as your companion. The full code is available
 #
 
 # Mario game environment
-!pip install gym-super-mario-bros==7.3.0 opencv-python
+!pip install gymnasium "gym-super-mario-bros>=9.1.0" scikit-image
 
 import os
 import copy
@@ -49,10 +49,10 @@ import gymnasium as gym
 from gymnasium.spaces import Box
 from gymnasium.wrappers import FrameStackObservation as FrameStack, GrayscaleObservation as GrayScaleObservation
 
-#NES Emulator for OpenAI Gym
+# NES Emulator wrapper
 from nes_py.wrappers import JoypadSpace
 
-# Super Mario environment for OpenAI Gym
+# Super Mario environment
 import gym_super_mario_bros
 
 
@@ -131,7 +131,7 @@ print(f'{next_state.shape},\n {reward},\n {done},\n {info}')
 # ``ResizeObservation`` downsamples each observation into a square image.
 # New size: ``[1, 84, 84]``
 #
-# ``SkipFrame`` is a custom wrapper that inherits from ``gym.Wrapper`` and
+# ``SkipFrame`` is a custom wrapper that inherits from ``gymnasium.Wrapper`` and
 # implements the ``step()`` function. Because consecutive frames don’t
 # vary much, we can skip n-intermediate frames without losing much
 # information. The n-th frame aggregates rewards accumulated over each
