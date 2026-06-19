@@ -82,7 +82,7 @@ try:
                     "奖励": f"{total_reward:.1f}",
                     "通关": flag_get,
                 })
-                print(
+                tqdm.write(
                     f"第 {episode} 回合结束："
                     f"步数={step}，奖励={total_reward:.1f}，是否通关={flag_get}"
                 )

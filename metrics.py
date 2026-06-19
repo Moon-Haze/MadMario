@@ -1,20 +1,36 @@
-import numpy as np
-import time, datetime
+import csv
+import time
+
 import matplotlib.pyplot as plt
+import numpy as np
+from tqdm import tqdm
+
+
+METRIC_DECIMALS = 3
+EPSILON_DECIMALS = 4
+MEAN_WINDOW = 100
+PLOT_CONFIGS = [
+    ("平均奖励曲线", "记录次数", "平均奖励"),
+    ("平均长度曲线", "记录次数", "平均长度"),
+    ("平均损失曲线", "记录次数", "平均损失"),
+    ("平均 Q 值曲线", "记录次数", "平均 Q 值"),
+]
+
+plt.rcParams["font.sans-serif"] = ["Microsoft YaHei", "SimHei", "Arial Unicode MS"]
+plt.rcParams["axes.unicode_minus"] = False
+
 
 class MetricLogger():
     def __init__(self, save_dir):
-        self.save_log = save_dir / "log"
-        with open(self.save_log, "w") as f:
-            f.write(
-                f"{'回合':>8}{'步数':>8}{'探索率':>10}{'平均奖励':>15}"
-                f"{'平均长度':>15}{'平均损失':>15}{'平均Q值':>15}"
-                f"{'时间间隔':>15}{'时间':>20}\n"
-            )
-        self.ep_rewards_plot = save_dir / "reward_plot.jpg"
-        self.ep_lengths_plot = save_dir / "length_plot.jpg"
-        self.ep_avg_losses_plot = save_dir / "loss_plot.jpg"
-        self.ep_avg_qs_plot = save_dir / "q_plot.jpg"
+        self.save_csv = save_dir / "metrics.csv"
+        self.plot_paths = [
+            save_dir / "reward_plot.png",
+            save_dir / "length_plot.png",
+            save_dir / "loss_plot.png",
+            save_dir / "q_plot.png",
+        ]
+
+        self._ensure_csv_header()
 
         # 历史指标
         self.ep_rewards = []
@@ -22,11 +38,9 @@ class MetricLogger():
         self.ep_avg_losses = []
         self.ep_avg_qs = []
 
-        # 移动平均值，每次调用 record() 时都会追加
-        self.moving_avg_ep_rewards = []
-        self.moving_avg_ep_lengths = []
-        self.moving_avg_ep_avg_losses = []
-        self.moving_avg_ep_avg_qs = []
+        # 移动平均值，每次调用 record() 时都会追加；恢复训练时会从 CSV 读取旧曲线
+        self.moving_avgs = [[], [], [], []]
+        self._load_history_from_csv()
 
         # 当前回合指标
         self.init_episode()
@@ -34,29 +48,68 @@ class MetricLogger():
         # 计时
         self.record_time = time.time()
 
+    def _ensure_csv_header(self):
+        if self.save_csv.exists() and self.save_csv.stat().st_size > 0:
+            return
+        with open(self.save_csv, "w", newline="", encoding="utf-8") as f:
+            writer = csv.writer(f)
+            writer.writerow([
+                "episode",
+                "step",
+                "epsilon",
+                "mean_reward",
+                "mean_length",
+                "mean_loss",
+                "mean_q",
+                "time_delta",
+            ])
+
+    def _load_history_from_csv(self):
+        if not self.save_csv.exists() or self.save_csv.stat().st_size == 0:
+            return
+
+        with open(self.save_csv, "r", newline="", encoding="utf-8") as f:
+            reader = csv.DictReader(f)
+            for row in reader:
+                try:
+                    self.moving_avgs[0].append(float(row["mean_reward"]))
+                    self.moving_avgs[1].append(float(row["mean_length"]))
+                    self.moving_avgs[2].append(float(row["mean_loss"]))
+                    self.moving_avgs[3].append(float(row["mean_q"]))
+                except (KeyError, TypeError, ValueError):
+                    continue
 
     def log_step(self, reward, loss, q):
         self.curr_ep_reward += reward
         self.curr_ep_length += 1
-        if loss:
+        if loss is not None:
             self.curr_ep_loss += loss
             self.curr_ep_q += q
             self.curr_ep_loss_length += 1
 
     def log_episode(self):
         "记录一个回合的结束"
-        self.ep_rewards.append(self.curr_ep_reward)
-        self.ep_lengths.append(self.curr_ep_length)
         if self.curr_ep_loss_length == 0:
             ep_avg_loss = 0
             ep_avg_q = 0
         else:
-            ep_avg_loss = np.round(self.curr_ep_loss / self.curr_ep_loss_length, 5)
-            ep_avg_q = np.round(self.curr_ep_q / self.curr_ep_loss_length, 5)
-        self.ep_avg_losses.append(ep_avg_loss)
-        self.ep_avg_qs.append(ep_avg_q)
+            ep_avg_loss = self._round_metric(self.curr_ep_loss / self.curr_ep_loss_length)
+            ep_avg_q = self._round_metric(self.curr_ep_q / self.curr_ep_loss_length)
+        self.log_episode_metrics(
+            self.curr_ep_reward,
+            self.curr_ep_length,
+            ep_avg_loss,
+            ep_avg_q,
+        )
 
         self.init_episode()
+
+    def log_episode_metrics(self, ep_reward, ep_length, ep_avg_loss=0, ep_avg_q=0):
+        "记录一个已经统计完成的回合。"
+        self.ep_rewards.append(ep_reward)
+        self.ep_lengths.append(ep_length)
+        self.ep_avg_losses.append(ep_avg_loss)
+        self.ep_avg_qs.append(ep_avg_q)
 
     def init_episode(self):
         self.curr_ep_reward = 0.0
@@ -65,42 +118,69 @@ class MetricLogger():
         self.curr_ep_q = 0.0
         self.curr_ep_loss_length = 0
 
-    def record(self, episode, epsilon, step):
-        mean_ep_reward = np.round(np.mean(self.ep_rewards[-100:]), 3)
-        mean_ep_length = np.round(np.mean(self.ep_lengths[-100:]), 3)
-        mean_ep_loss = np.round(np.mean(self.ep_avg_losses[-100:]), 3)
-        mean_ep_q = np.round(np.mean(self.ep_avg_qs[-100:]), 3)
-        self.moving_avg_ep_rewards.append(mean_ep_reward)
-        self.moving_avg_ep_lengths.append(mean_ep_length)
-        self.moving_avg_ep_avg_losses.append(mean_ep_loss)
-        self.moving_avg_ep_avg_qs.append(mean_ep_q)
+    def _round_metric(self, value):
+        return round(float(value), METRIC_DECIMALS)
 
+    def _round_epsilon(self, value):
+        return round(float(value), EPSILON_DECIMALS)
+
+    def _mean_last(self, values):
+        if not values:
+            return 0.0
+        return self._round_metric(np.mean(values[-MEAN_WINDOW:]))
+
+    def record(self, episode, epsilon, step):
+        mean_ep_reward = self._mean_last(self.ep_rewards)
+        mean_ep_length = self._mean_last(self.ep_lengths)
+        mean_ep_loss = self._mean_last(self.ep_avg_losses)
+        mean_ep_q = self._mean_last(self.ep_avg_qs)
+        for moving_avg, mean in zip(
+            self.moving_avgs,
+            [mean_ep_reward, mean_ep_length, mean_ep_loss, mean_ep_q],
+        ):
+            moving_avg.append(mean)
 
         last_record_time = self.record_time
         self.record_time = time.time()
-        time_since_last_record = np.round(self.record_time - last_record_time, 3)
+        time_since_last_record = self._round_metric(self.record_time - last_record_time)
 
-        print(
-            f"回合 {episode} - "
-            f"步数 {step} - "
-            f"Epsilon {epsilon} - "
-            f"平均奖励 {mean_ep_reward} - "
-            f"平均长度 {mean_ep_length} - "
-            f"平均损失 {mean_ep_loss} - "
-            f"平均 Q 值 {mean_ep_q} - "
-            f"时间间隔 {time_since_last_record} - "
-            # f"时间 {datetime.datetime.now().strftime('%Y-%m-%dT%H:%M:%S')}"
+        tqdm.write(
+            f"回合={episode} | "
+            f"步数={step} | "
+            f"探索率={self._round_epsilon(epsilon):.{EPSILON_DECIMALS}f} | "
+            f"平均奖励={mean_ep_reward:.3f} | "
+            f"平均长度={mean_ep_length:.3f} | "
+            f"平均损失={mean_ep_loss:.3f} | "
+            f"平均 Q 值={mean_ep_q:.3f} | "
+            f"时间间隔={time_since_last_record:.3f}"
         )
 
-        with open(self.save_log, "a") as f:
-            f.write(
-                f"{episode:8d}{step:8d}{epsilon:10.3f}"
-                f"{mean_ep_reward:15.3f}{mean_ep_length:15.3f}{mean_ep_loss:15.3f}{mean_ep_q:15.3f}"
-                f"{time_since_last_record:15.3f}"
-                # f"{datetime.datetime.now().strftime('%Y-%m-%dT%H:%M:%S'):>20}\n"
-            )
 
-        for metric in ["ep_rewards", "ep_lengths", "ep_avg_losses", "ep_avg_qs"]:
-            plt.plot(getattr(self, f"moving_avg_{metric}"))
-            plt.savefig(getattr(self, f"{metric}_plot"))
-            plt.clf()
+        with open(self.save_csv, "a", newline="", encoding="utf-8") as f:
+            writer = csv.writer(f)
+            writer.writerow([
+                episode,
+                step,
+                self._round_epsilon(epsilon),
+                mean_ep_reward,
+                mean_ep_length,
+                mean_ep_loss,
+                mean_ep_q,
+                time_since_last_record,
+            ])
+
+        for moving_avg, plot_path, (title, xlabel, ylabel) in zip(
+            self.moving_avgs,
+            self.plot_paths,
+            PLOT_CONFIGS,
+        ):
+            plt.figure(figsize=(11.69, 8.27))
+            plt.plot(moving_avg, label=ylabel, linewidth=2)
+            plt.title(title)
+            plt.xlabel(xlabel)
+            plt.ylabel(ylabel)
+            plt.grid(True, linestyle="--", alpha=0.5)
+            plt.legend()
+            plt.tight_layout()
+            plt.savefig(plot_path)
+            plt.close()

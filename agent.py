@@ -4,6 +4,7 @@ from pathlib import Path
 
 from neural import MarioNet
 from collections import deque
+from tqdm import tqdm
 
 
 class Mario:
@@ -19,23 +20,28 @@ class Mario:
         self.gamma = 0.9
 
         self.curr_step = 0
-        self.burnin = 1e5  # 训练前至少需要收集的经验数量
+        self.current_episode = 0
+        self.loaded_episode = 0
+        self.burnin = int(1e5)  # 训练前至少需要收集的经验数量
         self.learn_every = 3   # 每隔多少条经验更新一次 Q_online
-        self.sync_every = 1e4   # 每隔多少条经验同步一次 Q_target 和 Q_online
+        self.sync_every = int(1e4)   # 每隔多少条经验同步一次 Q_target 和 Q_online
 
-        self.save_every = 5e5   # 每隔多少条经验保存一次 MarioNet
+        self.save_every = int(5e5)   # 每隔多少条经验保存一次 MarioNet
         self.save_dir = save_dir
+        self.next_learn_step = self._next_interval_step(self.burnin, self.learn_every)
+        self.next_sync_step = self.sync_every
+        self.next_save_step = self.save_every
 
         self.use_cuda = torch.cuda.is_available()
         self.device = torch.device('cuda' if self.use_cuda else 'cpu')
 
         # Mario 用于预测最优动作的深度神经网络
         self.net = MarioNet(self.state_dim, self.action_dim).float().to(self.device)
-        if checkpoint:
-            self.load(checkpoint)
-
         self.optimizer = torch.optim.Adam(self.net.parameters(), lr=0.00025)
         self.loss_fn = torch.nn.SmoothL1Loss()
+
+        if checkpoint:
+            self.load(checkpoint)
 
 
     def act(self, state):
@@ -47,24 +53,32 @@ class Mario:
         输出：
         action_idx (int)：表示 Mario 将执行哪个动作的整数
         """
-        # 探索
-        if np.random.rand() < self.exploration_rate:
-            action_idx = np.random.randint(self.action_dim)
+        return self.act_batch(np.expand_dims(state, axis=0))[0]
 
-        # 利用
-        else:
-            state = torch.as_tensor(state, dtype=torch.float32, device=self.device).unsqueeze(0)
+
+    def act_batch(self, states):
+        """给定一批状态，为每个环境选择一个 epsilon-greedy 动作。"""
+        states = np.asarray(states)
+        batch_size = len(states)
+        actions = np.empty(batch_size, dtype=np.int64)
+        explore_mask = np.random.rand(batch_size) < self.exploration_rate
+
+        actions[explore_mask] = np.random.randint(self.action_dim, size=explore_mask.sum())
+        exploit_indices = np.flatnonzero(~explore_mask)
+        if len(exploit_indices) > 0:
+            exploit_states = torch.as_tensor(
+                states[exploit_indices],
+                dtype=torch.float32,
+                device=self.device,
+            )
             with torch.no_grad():
-                action_values = self.net(state, model='online')
-            action_idx = torch.argmax(action_values, axis=1).item()
+                action_values = self.net(exploit_states, model='online')
+            actions[exploit_indices] = torch.argmax(action_values, axis=1).cpu().numpy()
 
-        # 降低 exploration_rate
-        self.exploration_rate *= self.exploration_rate_decay
+        self.exploration_rate *= self.exploration_rate_decay ** batch_size
         self.exploration_rate = max(self.exploration_rate_min, self.exploration_rate)
-
-        # 递增 step
-        self.curr_step += 1
-        return action_idx
+        self.curr_step += batch_size
+        return actions.tolist()
 
     def cache(self, state, next_state, action, reward, done):
         """
@@ -81,6 +95,18 @@ class Mario:
         next_state = np.array(next_state, copy=True)
 
         self.memory.append( (state, next_state, action, reward, done,) )
+
+
+    def cache_batch(self, states, next_states, actions, rewards, dones):
+        """将一批并行环境的经验存入经验回放缓冲区。"""
+        for state, next_state, action, reward, done in zip(
+            states,
+            next_states,
+            actions,
+            rewards,
+            dones,
+        ):
+            self.cache(state, next_state, action, reward, done)
 
 
     def recall(self):
@@ -122,19 +148,11 @@ class Mario:
         self.net.target.load_state_dict(self.net.online.state_dict())
 
 
-    def learn(self):
-        if self.curr_step % self.sync_every == 0:
-            self.sync_Q_target()
+    def _next_interval_step(self, current_step, interval):
+        return ((int(current_step) // interval) + 1) * interval
 
-        if self.curr_step % self.save_every == 0:
-            self.save()
 
-        if self.curr_step < self.burnin:
-            return None, None
-
-        if self.curr_step % self.learn_every != 0:
-            return None, None
-
+    def _learn_once(self):
         # 从记忆中采样
         state, next_state, action, reward, done = self.recall()
 
@@ -150,16 +168,46 @@ class Mario:
         return (td_est.mean().item(), loss)
 
 
-    def save(self):
-        save_path = self.save_dir / f"mario_net_{int(self.curr_step // self.save_every)}.chkpt"
-        torch.save(
-            dict(
-                model=self.net.state_dict(),
-                exploration_rate=self.exploration_rate
-            ),
-            save_path
+    def learn(self):
+        q, loss = None, None
+
+        while self.curr_step >= self.next_sync_step:
+            self.sync_Q_target()
+            self.next_sync_step += self.sync_every
+
+        while self.curr_step >= self.next_save_step:
+            self.save()
+            self.next_save_step += self.save_every
+
+        if self.curr_step < self.burnin or len(self.memory) < self.batch_size:
+            return None, None
+
+        while self.curr_step >= self.next_learn_step:
+            q, loss = self._learn_once()
+            self.next_learn_step += self.learn_every
+
+        return q, loss
+
+
+    def save(self, episode=None):
+        if episode is not None:
+            self.current_episode = episode
+
+        checkpoint = dict(
+            model=self.net.state_dict(),
+            optimizer=self.optimizer.state_dict(),
+            exploration_rate=self.exploration_rate,
+            curr_step=self.curr_step,
+            episode=self.current_episode,
+            save_dir=str(self.save_dir),
         )
-        print(f"MarioNet 已保存到 {save_path} 位于步数 {self.curr_step}")
+        save_path = self.save_dir / f"mario_net_{int(self.curr_step // self.save_every)}.chkpt"
+        latest_path = Path("checkpoints") / "latest.chkpt"
+        latest_path.parent.mkdir(parents=True, exist_ok=True)
+
+        torch.save(checkpoint, save_path)
+        torch.save(checkpoint, latest_path)
+        tqdm.write(f"MarioNet 已保存到 {save_path}，latest 已更新，当前步数 {self.curr_step}，当前回合 {self.current_episode}")
 
 
     def load(self, load_path):
@@ -167,9 +215,24 @@ class Mario:
             raise ValueError(f"{load_path} 不存在")
 
         ckp = torch.load(load_path, map_location=('cuda' if self.use_cuda else 'cpu'))
-        exploration_rate = ckp.get('exploration_rate')
+        exploration_rate = ckp.get('exploration_rate', self.exploration_rate)
         state_dict = ckp.get('model')
+        optimizer_state = ckp.get('optimizer')
+        curr_step = ckp.get('curr_step', 0)
+        episode = ckp.get('episode', 0)
+        saved_save_dir = ckp.get('save_dir')
+        if saved_save_dir:
+            self.save_dir = Path(saved_save_dir)
+            self.save_dir.mkdir(parents=True, exist_ok=True)
 
-        print(f"正在加载模型 {load_path} ，探索率为 {exploration_rate}")
+        tqdm.write(f"正在加载模型 {load_path}，探索率为 {exploration_rate:.4f}，步数为 {curr_step}，回合为 {episode}")
         self.net.load_state_dict(state_dict)
+        if optimizer_state is not None:
+            self.optimizer.load_state_dict(optimizer_state)
         self.exploration_rate = exploration_rate
+        self.curr_step = curr_step
+        self.current_episode = episode
+        self.loaded_episode = episode
+        self.next_learn_step = self._next_interval_step(max(self.curr_step, self.burnin), self.learn_every)
+        self.next_sync_step = self._next_interval_step(self.curr_step, self.sync_every)
+        self.next_save_step = self._next_interval_step(self.curr_step, self.save_every)
