@@ -4,6 +4,7 @@ os.environ['KMP_DUPLICATE_LIB_OK']='True'
 import random, datetime
 from pathlib import Path
 
+from tqdm import tqdm
 import gymnasium as gym
 import gym_super_mario_bros
 from gym_super_mario_bros.actions import COMPLEX_MOVEMENT
@@ -49,29 +50,21 @@ for e in range(episodes):
 
     # 开始游戏！
     while True:
-
         # 3. 显示环境（画面）
-        env.render()
-
+        # env.render()
         # 4. 让智能体基于当前状态运行
         action = mario.act(state)
-
         # 5. 智能体执行动作
         next_state, reward, terminated, truncated, info = env.step(action)
         done = terminated or truncated
-
         # 6. 记住经验
         mario.cache(state, next_state, action, reward, done)
-
         # 7. 学习
         q, loss = mario.learn()
-
         # 8. 日志记录
         logger.log_step(reward, loss, q)
-
         # 9. 更新状态
         state = next_state
-
         # 10. 检查游戏是否结束
         if done or info['flag_get']:
             break
