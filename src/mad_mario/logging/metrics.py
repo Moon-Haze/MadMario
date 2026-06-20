@@ -11,10 +11,10 @@ METRIC_DECIMALS = 3
 EPSILON_DECIMALS = 4
 MEAN_WINDOW = 100
 PLOT_CONFIGS = [
-    ("平均奖励曲线", "记录次数", "平均奖励"),
-    ("平均长度曲线", "记录次数", "平均长度"),
-    ("平均损失曲线", "记录次数", "平均损失"),
-    ("平均 Q 值曲线", "记录次数", "平均 Q 值"),
+    ("平均奖励曲线", "回合", "平均奖励"),
+    ("平均长度曲线", "回合", "平均长度"),
+    ("平均损失曲线", "回合", "平均损失"),
+    ("平均 Q 值曲线", "回合", "平均 Q 值"),
 ]
 
 plt.rcParams["font.sans-serif"] = ["Microsoft YaHei", "SimHei", "Arial Unicode MS"]
@@ -126,7 +126,7 @@ class MetricLogger:
             return 0.0
         return self._round_metric(np.mean(values[-MEAN_WINDOW:]))
 
-    def record(self, episode, epsilon, step):
+    def record(self, episode, epsilon, step, emit=False):
         mean_ep_reward = self._mean_last(self.ep_rewards)
         mean_ep_length = self._mean_last(self.ep_lengths)
         mean_ep_loss = self._mean_last(self.ep_avg_losses)
@@ -140,17 +140,6 @@ class MetricLogger:
         last_record_time = self.record_time
         self.record_time = time.time()
         time_since_last_record = self._round_metric(self.record_time - last_record_time)
-
-        tqdm.write(
-            f"回合={episode} | "
-            f"步数={step} | "
-            f"探索率={self._round_epsilon(epsilon):.{EPSILON_DECIMALS}f} | "
-            f"平均奖励={mean_ep_reward:.3f} | "
-            f"平均长度={mean_ep_length:.3f} | "
-            f"平均损失={mean_ep_loss:.3f} | "
-            f"平均 Q 值={mean_ep_q:.3f} | "
-            f"时间间隔={time_since_last_record:.3f}"
-        )
 
         row = [
             episode,
@@ -166,6 +155,20 @@ class MetricLogger:
             with open(csv_path, "a", newline="", encoding="utf-8") as f:
                 csv.writer(f).writerow(row)
 
+        if not emit:
+            return
+
+        tqdm.write(
+            f"回合={episode} | "
+            f"步数={step} | "
+            f"探索率={self._round_epsilon(epsilon):.{EPSILON_DECIMALS}f} | "
+            f"平均奖励={mean_ep_reward:.3f} | "
+            f"平均长度={mean_ep_length:.3f} | "
+            f"平均损失={mean_ep_loss:.3f} | "
+            f"平均 Q 值={mean_ep_q:.3f} | "
+            f"时间间隔={time_since_last_record:.3f}"
+        )
+
         for plot_paths in self.plot_path_groups:
             self._write_plots(plot_paths)
 
@@ -177,7 +180,8 @@ class MetricLogger:
         ):
             plot_path.parent.mkdir(parents=True, exist_ok=True)
             plt.figure(figsize=(11.69, 8.27))
-            plt.plot(moving_avg, label=ylabel, linewidth=2)
+            episodes = range(1, len(moving_avg) + 1)
+            plt.plot(episodes, moving_avg, label=ylabel, linewidth=2)
             plt.title(title)
             plt.xlabel(xlabel)
             plt.ylabel(ylabel)

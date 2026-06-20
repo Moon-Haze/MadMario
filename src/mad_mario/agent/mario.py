@@ -1,3 +1,5 @@
+from collections import defaultdict, deque
+
 import numpy as np
 import torch
 
@@ -11,12 +13,22 @@ class Mario:
         self.state_dim = state_dim
         self.action_dim = action_dim
         self.batch_size = training_config.batch_size
-        self.memory = ReplayBuffer(agent_config.replay_capacity)
+        self.memory = ReplayBuffer(
+            agent_config.replay_capacity,
+            state_dim,
+            alpha=agent_config.per_alpha,
+            epsilon=agent_config.per_epsilon,
+        )
 
+        self.exploration_rate_start = agent_config.exploration_rate
         self.exploration_rate = agent_config.exploration_rate
-        self.exploration_rate_decay = agent_config.exploration_rate_decay
+        self.exploration_decay_steps = agent_config.exploration_decay_steps
         self.exploration_rate_min = agent_config.exploration_rate_min
+        self.gradient_clip_norm = agent_config.gradient_clip_norm
         self.gamma = agent_config.gamma
+        self.n_step = max(1, int(agent_config.n_step))
+        self.per_beta_start = agent_config.per_beta_start
+        self.per_beta_frames = agent_config.per_beta_frames
 
         self.curr_step = 0
         self.current_episode = 0
@@ -26,13 +38,14 @@ class Mario:
         self.sync_every = training_config.sync_every
         self.next_learn_step = self._next_interval_step(self.burnin, self.learn_every)
         self.next_sync_step = self.sync_every
+        self.n_step_buffers = defaultdict(deque)
 
         self.use_cuda = torch.cuda.is_available()
         self.device = torch.device("cuda" if self.use_cuda else "cpu")
 
         self.net = MarioNet(self.state_dim, self.action_dim).float().to(self.device)
         self.optimizer = torch.optim.Adam(self.net.parameters(), lr=agent_config.learning_rate)
-        self.loss_fn = torch.nn.SmoothL1Loss()
+        self.loss_fn = torch.nn.SmoothL1Loss(reduction="none")
 
     def act(self, state):
         """给定一个状态，选择一个 epsilon-greedy 动作，并更新步数。"""
@@ -48,54 +61,113 @@ class Mario:
         actions[explore_mask] = np.random.randint(self.action_dim, size=explore_mask.sum())
         exploit_indices = np.flatnonzero(~explore_mask)
         if len(exploit_indices) > 0:
-            exploit_states = torch.as_tensor(
-                states[exploit_indices],
-                dtype=torch.float32,
-                device=self.device,
-            )
+            exploit_states = self._state_tensor(states[exploit_indices])
             with torch.no_grad():
                 action_values = self.net(exploit_states, model="online")
             actions[exploit_indices] = torch.argmax(action_values, axis=1).cpu().numpy()
 
-        self.exploration_rate *= self.exploration_rate_decay ** batch_size
-        self.exploration_rate = max(self.exploration_rate_min, self.exploration_rate)
         self.curr_step += batch_size
+        self._update_exploration_rate()
         return actions.tolist()
 
+    def act_eval(self, state):
+        return self.act_eval_batch(np.expand_dims(state, axis=0))[0]
+
+    def act_eval_batch(self, states):
+        states = self._state_tensor(np.asarray(states))
+        with torch.no_grad():
+            action_values = self.net(states, model="online")
+        return torch.argmax(action_values, axis=1).cpu().numpy().tolist()
+
+    def _state_tensor(self, states):
+        states_array = np.asarray(states)
+        states_tensor = torch.as_tensor(states_array, dtype=torch.float32, device=self.device)
+        if states_array.dtype == np.uint8:
+            states_tensor = states_tensor.div(255.0)
+        return states_tensor
+
+    def _update_exploration_rate(self):
+        if self.exploration_decay_steps <= 0:
+            self.exploration_rate = self.exploration_rate_min
+            return
+        progress = min(1.0, self.curr_step / self.exploration_decay_steps)
+        self.exploration_rate = self.exploration_rate_start + progress * (
+            self.exploration_rate_min - self.exploration_rate_start
+        )
+        self.exploration_rate = max(self.exploration_rate_min, self.exploration_rate)
+
     def cache(self, state, next_state, action, reward, done):
-        self.memory.push(state, next_state, action, reward, done)
+        self._cache_transition(0, state, next_state, action, reward, done)
 
     def cache_batch(self, states, next_states, actions, rewards, dones):
         """将一批并行环境的经验存入经验回放缓冲区。"""
-        for state, next_state, action, reward, done in zip(
+        for env_index, (state, next_state, action, reward, done) in enumerate(zip(
             states,
             next_states,
             actions,
             rewards,
             dones,
-        ):
-            self.cache(state, next_state, action, reward, done)
+        )):
+            self._cache_transition(env_index, state, next_state, action, reward, done)
+
+    def _cache_transition(self, env_index, state, next_state, action, reward, done):
+        buffer = self.n_step_buffers[env_index]
+        buffer.append((state, next_state, action, reward, done))
+
+        if len(buffer) >= self.n_step:
+            self._push_n_step_transition(buffer)
+            buffer.popleft()
+
+        if done:
+            while buffer:
+                self._push_n_step_transition(buffer)
+                buffer.popleft()
+
+    def _push_n_step_transition(self, buffer):
+        state, _, action, _, _ = buffer[0]
+        reward = 0.0
+        next_state = buffer[-1][1]
+        done = False
+        n_steps = 0
+        for step, (_, transition_next_state, _, transition_reward, transition_done) in enumerate(buffer):
+            reward += (self.gamma ** step) * float(transition_reward)
+            next_state = transition_next_state
+            done = bool(transition_done)
+            n_steps = step + 1
+            if done:
+                break
+        self.memory.push(state, next_state, action, reward, done, n_steps)
 
     def recall(self):
         """从记忆中取回一批经验。"""
-        return self.memory.sample(self.batch_size, self.device)
+        return self.memory.sample(self.batch_size, self._per_beta(), self.device)
+
+    def _per_beta(self):
+        progress = min(1.0, self.curr_step / max(1, self.per_beta_frames))
+        return self.per_beta_start + progress * (1.0 - self.per_beta_start)
 
     def td_estimate(self, state, action):
-        return self.net(state, model="online")[np.arange(0, self.batch_size), action]
+        batch_indices = torch.arange(action.shape[0], device=self.device)
+        return self.net(state, model="online")[batch_indices, action]
 
     @torch.no_grad()
-    def td_target(self, reward, next_state, done):
+    def td_target(self, reward, next_state, done, n_steps):
         next_state_q = self.net(next_state, model="online")
         best_action = torch.argmax(next_state_q, axis=1)
-        next_q = self.net(next_state, model="target")[np.arange(0, self.batch_size), best_action]
-        return (reward + (1 - done.float()) * self.gamma * next_q).float()
+        batch_indices = torch.arange(best_action.shape[0], device=self.device)
+        next_q = self.net(next_state, model="target")[batch_indices, best_action]
+        discount = torch.pow(torch.full_like(n_steps, self.gamma), n_steps)
+        return (reward + (1 - done.float()) * discount * next_q).float()
 
-    def update_Q_online(self, td_estimate, td_target):
-        loss = self.loss_fn(td_estimate, td_target)
+    def update_Q_online(self, td_estimate, td_target, weights):
+        td_errors = td_target.detach() - td_estimate
+        losses = self.loss_fn(td_estimate, td_target)
+        loss = (losses * weights).mean()
         self.optimizer.zero_grad()
         loss.backward()
+        torch.nn.utils.clip_grad_norm_(self.net.online.parameters(), self.gradient_clip_norm)
         self.optimizer.step()
-        return loss.item()
+        return loss.item(), td_errors.detach()
 
     def sync_Q_target(self):
         self.net.target.load_state_dict(self.net.online.state_dict())
@@ -104,10 +176,11 @@ class Mario:
         return ((int(current_step) // interval) + 1) * interval
 
     def _learn_once(self):
-        state, next_state, action, reward, done = self.recall()
+        state, next_state, action, reward, done, n_steps, weights, indices = self.recall()
         td_est = self.td_estimate(state, action)
-        td_tgt = self.td_target(reward, next_state, done)
-        loss = self.update_Q_online(td_est, td_tgt)
+        td_tgt = self.td_target(reward, next_state, done, n_steps)
+        loss, td_errors = self.update_Q_online(td_est, td_tgt, weights)
+        self.memory.update_priorities(indices, td_errors)
         return td_est.mean().item(), loss
 
     def learn(self):

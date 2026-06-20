@@ -40,6 +40,17 @@ class SkipFrame(gym.Wrapper):
         return obs, total_reward, terminated, truncated, info
 
 
+class ClipReward(gym.Wrapper):
+    def __init__(self, env, clip_value):
+        super().__init__(env)
+        self.clip_value = float(clip_value)
+
+    def step(self, action):
+        obs, reward, terminated, truncated, info = self.env.step(action)
+        reward = float(np.clip(reward, -self.clip_value, self.clip_value))
+        return obs, reward, terminated, truncated, info
+
+
 class NormalizeObservation(gym.ObservationWrapper):
     """将观测从 uint8 [0, 255] 归一化为 float32 [0, 1]。"""
 

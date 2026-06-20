@@ -20,7 +20,14 @@ class CheckpointManager:
         if checkpoint_path is None:
             tqdm.write("未检测到检查点，将从头开始训练。")
             return None
-        self.load(agent, checkpoint_path)
+
+        try:
+            self.load(agent, checkpoint_path)
+        except Exception as exc:
+            if self.config.checkpoint is not None:
+                raise
+            tqdm.write(f"检查点 {checkpoint_path} 无法加载，将从头开始训练。原因: {exc}")
+            return None
         return checkpoint_path
 
     def load(self, agent: Mario, checkpoint_path: Path) -> None:
@@ -48,4 +55,19 @@ class CheckpointManager:
         tqdm.write(
             f"MarioNet 已保存到 {self.artifacts.latest_checkpoint}，"
             f"当前步数 {agent.curr_step}，当前回合 {agent.current_episode}"
+        )
+
+    def save_best(self, agent: Mario, eval_reward: float, episode: int | None = None) -> None:
+        if episode is not None:
+            agent.current_episode = episode
+
+        checkpoint = agent.state_dict()
+        checkpoint["best_eval_reward"] = float(eval_reward)
+        for checkpoint_path in self.artifacts.best_checkpoint_paths:
+            checkpoint_path.parent.mkdir(parents=True, exist_ok=True)
+            torch.save(checkpoint, checkpoint_path)
+
+        tqdm.write(
+            f"最佳 MarioNet 已保存到 {self.artifacts.best_checkpoint}，"
+            f"评估奖励 {eval_reward:.3f}，当前步数 {agent.curr_step}，当前回合 {agent.current_episode}"
         )

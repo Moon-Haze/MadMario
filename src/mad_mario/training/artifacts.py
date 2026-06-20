@@ -11,10 +11,12 @@ from mad_mario.config import ArtifactConfig
 class RunArtifacts:
     save_root: Path
     latest_checkpoint: Path
+    best_checkpoint: Path
     latest_metrics_csv: Path
     latest_plot_paths: list[Path]
     run_dir: Path | None = None
     run_checkpoint: Path | None = None
+    run_best_checkpoint: Path | None = None
     run_metrics_csv: Path | None = None
     run_plot_paths: list[Path] | None = None
 
@@ -39,20 +41,28 @@ class RunArtifacts:
             paths.append(self.run_checkpoint)
         return paths
 
+    @property
+    def best_checkpoint_paths(self) -> list[Path]:
+        paths = [self.best_checkpoint]
+        if self.run_best_checkpoint is not None:
+            paths.append(self.run_best_checkpoint)
+        return paths
+
 
 def create_artifacts(config: ArtifactConfig) -> RunArtifacts:
     save_root = config.save_root
     save_root.mkdir(parents=True, exist_ok=True)
 
     latest_plot_paths = [
-        save_root / "latest_reward_plot.png",
-        save_root / "latest_length_plot.png",
-        save_root / "latest_loss_plot.png",
-        save_root / "latest_q_plot.png",
+        save_root / "latest_reward.png",
+        save_root / "latest_length.png",
+        save_root / "latest_loss.png",
+        save_root / "latest_q.png",
     ]
 
     run_dir = None
     run_checkpoint = None
+    run_best_checkpoint = None
     run_metrics_csv = None
     run_plot_paths = None
     if config.keep_runs:
@@ -60,21 +70,24 @@ def create_artifacts(config: ArtifactConfig) -> RunArtifacts:
         run_dir = save_root / "runs" / run_name
         run_dir.mkdir(parents=True, exist_ok=True)
         run_checkpoint = run_dir / "checkpoint.chkpt"
+        run_best_checkpoint = run_dir / "best.chkpt"
         run_metrics_csv = run_dir / "metrics.csv"
         run_plot_paths = [
-            run_dir / "reward_plot.png",
-            run_dir / "length_plot.png",
-            run_dir / "loss_plot.png",
-            run_dir / "q_plot.png",
+            run_dir / "reward.png",
+            run_dir / "length.png",
+            run_dir / "loss.png",
+            run_dir / "q.png",
         ]
 
     return RunArtifacts(
         save_root=save_root,
         latest_checkpoint=save_root / "latest.chkpt",
+        best_checkpoint=save_root / "best.chkpt",
         latest_metrics_csv=save_root / "latest_metrics.csv",
         latest_plot_paths=latest_plot_paths,
         run_dir=run_dir,
         run_checkpoint=run_checkpoint,
+        run_best_checkpoint=run_best_checkpoint,
         run_metrics_csv=run_metrics_csv,
         run_plot_paths=run_plot_paths,
     )

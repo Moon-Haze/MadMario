@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import os
+import re
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -14,16 +15,26 @@ class EnvConfig:
     frame_stack: int = 4
     resize_shape: int = 84
     render_mode: str | None = None
+    movement: str = "right_only"
+    clip_rewards: bool = True
+    reward_clip_value: float = 1.0
+    normalize_observation: bool = False
 
 
 @dataclass
 class AgentConfig:
     replay_capacity: int = 100000
-    gamma: float = 0.9
-    learning_rate: float = 0.00025
+    gamma: float = 0.99
+    learning_rate: float = 0.0000625
     exploration_rate: float = 1.0
-    exploration_rate_decay: float = 0.99999975
-    exploration_rate_min: float = 0.1
+    exploration_decay_steps: int = int(2e6)
+    exploration_rate_min: float = 0.02
+    gradient_clip_norm: float = 10.0
+    n_step: int = 3
+    per_alpha: float = 0.6
+    per_beta_start: float = 0.4
+    per_beta_frames: int = int(2e6)
+    per_epsilon: float = 1e-6
 
 
 @dataclass
@@ -38,12 +49,14 @@ class ArtifactConfig:
 
 @dataclass
 class TrainingConfig:
-    episodes: int = 40000
+    episodes: int = 20000
     batch_size: int = 32
-    burnin: int = int(1e5)
-    learn_every: int = 3
-    sync_every: int = int(1e4)
+    burnin: int = int(5e4)
+    learn_every: int = 4
+    sync_every: int = int(8e3)
     record_every: int = 20
+    eval_every: int = 50
+    eval_episodes: int = 3
     num_envs: int = max(1, (os.cpu_count() or 2) // 2)
     vector: bool = False
 
@@ -54,6 +67,25 @@ class AppConfig:
     agent: AgentConfig
     artifacts: ArtifactConfig
     training: TrainingConfig
+
+
+def _slug(value) -> str:
+    slug = re.sub(r"[^A-Za-z0-9_.-]+", "-", str(value)).strip("-")
+    return slug or "default"
+
+
+def compatible_save_root(save_root: Path, config: EnvConfig) -> Path:
+    state_dim = "x".join(str(dim) for dim in config.state_dim)
+    folder = "_".join(
+        (
+            f"env-{_slug(config.env_name)}",
+            f"movement-{_slug(config.movement)}",
+            f"state-{state_dim}",
+            f"stack-{config.frame_stack}",
+            f"resize-{config.resize_shape}",
+        )
+    )
+    return save_root / folder
 
 
 def resolve_checkpoint(config: ArtifactConfig) -> Path | None:
@@ -80,43 +112,82 @@ def build_parser() -> argparse.ArgumentParser:
 
 def add_train_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--episodes", type=int, default=TrainingConfig.episodes, help="训练回合数")
+    parser.add_argument(
+        "--movement",
+        choices=("right_only", "simple", "complex"),
+        default=EnvConfig.movement,
+        help="动作空间预设",
+    )
     parser.add_argument("--vector", action="store_true", help="启用并行环境训练")
     parser.add_argument("--num-envs", type=int, default=TrainingConfig.num_envs, help="并行环境数量")
     parser.add_argument("--save-root", type=Path, default=ArtifactConfig.save_root, help="checkpoint 根目录")
+    parser.add_argument("--flat-save-root", action="store_true", help="直接使用 checkpoint 根目录，不按兼容参数分子目录")
     parser.add_argument("--checkpoint", type=Path, default=None, help="指定要恢复的 checkpoint")
     parser.add_argument("--no-resume", action="store_true", help="忽略 latest checkpoint，从头开始训练")
     parser.add_argument("--keep-runs", action="store_true", help="额外保留本次训练的 run 目录")
     parser.add_argument("--run-name", default=None, help="指定 run 目录名称")
-    parser.add_argument("--record-every", type=int, default=TrainingConfig.record_every, help="每隔多少回合记录指标")
+    parser.add_argument("--record-every", type=int, default=TrainingConfig.record_every, help="每隔多少回合打印指标、刷新图表并保存 checkpoint")
+    parser.add_argument("--eval-every", type=int, default=TrainingConfig.eval_every, help="每隔多少回合执行一次贪心评估")
+    parser.add_argument("--eval-episodes", type=int, default=TrainingConfig.eval_episodes, help="每次评估运行的回合数")
     parser.add_argument("--save-every", type=int, default=ArtifactConfig.save_every, help="每隔多少步保存 checkpoint")
     parser.add_argument("--batch-size", type=int, default=TrainingConfig.batch_size, help="每次学习采样的 batch 大小")
     parser.add_argument("--burnin", type=int, default=TrainingConfig.burnin, help="开始训练前收集的经验数量")
     parser.add_argument("--replay-capacity", type=int, default=AgentConfig.replay_capacity, help="经验回放容量")
     parser.add_argument("--learning-rate", type=float, default=AgentConfig.learning_rate, help="学习率")
     parser.add_argument("--gamma", type=float, default=AgentConfig.gamma, help="折扣因子")
-    parser.add_argument("--exploration-decay", type=float, default=AgentConfig.exploration_rate_decay, help="探索率衰减")
+    parser.add_argument("--exploration-decay-steps", type=int, default=AgentConfig.exploration_decay_steps, help="epsilon 线性衰减步数")
     parser.add_argument("--exploration-min", type=float, default=AgentConfig.exploration_rate_min, help="最小探索率")
+    parser.add_argument("--gradient-clip-norm", type=float, default=AgentConfig.gradient_clip_norm, help="梯度裁剪范数")
+    parser.add_argument("--n-step", type=int, default=AgentConfig.n_step, help="N-step return 步数")
+    parser.add_argument("--per-alpha", type=float, default=AgentConfig.per_alpha, help="PER 优先级指数")
+    parser.add_argument("--per-beta-start", type=float, default=AgentConfig.per_beta_start, help="PER beta 初始值")
+    parser.add_argument("--per-beta-frames", type=int, default=AgentConfig.per_beta_frames, help="PER beta 退火步数")
+    parser.add_argument("--per-epsilon", type=float, default=AgentConfig.per_epsilon, help="PER priority epsilon")
+    parser.add_argument("--no-reward-clip", action="store_true", help="关闭奖励裁剪")
+    parser.add_argument("--reward-clip-value", type=float, default=EnvConfig.reward_clip_value, help="奖励裁剪绝对值")
+    parser.add_argument("--normalize-observation", action="store_true", help="在环境层归一化观测（默认保持 uint8）")
 
 
 def add_play_args(parser: argparse.ArgumentParser) -> None:
-    parser.add_argument("--checkpoint", type=Path, default=Path("checkpoints/latest.chkpt"), help="要播放的 checkpoint")
+    parser.add_argument("--checkpoint", type=Path, default=None, help="要播放的 checkpoint")
     parser.add_argument("--episodes", type=int, default=5, help="播放回合数")
+    parser.add_argument(
+        "--movement",
+        choices=("right_only", "simple", "complex"),
+        default=EnvConfig.movement,
+        help="动作空间预设",
+    )
     parser.add_argument("--render-mode", default="rgb_array", help="环境渲染模式")
     parser.add_argument("--save-root", type=Path, default=ArtifactConfig.save_root, help="输出根目录")
+    parser.add_argument("--flat-save-root", action="store_true", help="直接使用输出根目录，不按兼容参数分子目录")
 
 
 def config_from_train_args(args) -> AppConfig:
+    env_config = EnvConfig(
+        movement=args.movement,
+        clip_rewards=not args.no_reward_clip,
+        reward_clip_value=args.reward_clip_value,
+        normalize_observation=args.normalize_observation,
+    )
+    save_root = args.save_root if args.flat_save_root else compatible_save_root(args.save_root, env_config)
+
     return AppConfig(
-        env=EnvConfig(),
+        env=env_config,
         agent=AgentConfig(
             replay_capacity=args.replay_capacity,
             gamma=args.gamma,
             learning_rate=args.learning_rate,
-            exploration_rate_decay=args.exploration_decay,
+            exploration_decay_steps=args.exploration_decay_steps,
             exploration_rate_min=args.exploration_min,
+            gradient_clip_norm=args.gradient_clip_norm,
+            n_step=max(1, args.n_step),
+            per_alpha=args.per_alpha,
+            per_beta_start=args.per_beta_start,
+            per_beta_frames=max(1, args.per_beta_frames),
+            per_epsilon=args.per_epsilon,
         ),
         artifacts=ArtifactConfig(
-            save_root=args.save_root,
+            save_root=save_root,
             checkpoint=args.checkpoint,
             resume=not args.no_resume,
             keep_runs=args.keep_runs,
@@ -128,6 +199,8 @@ def config_from_train_args(args) -> AppConfig:
             batch_size=args.batch_size,
             burnin=args.burnin,
             record_every=args.record_every,
+            eval_every=args.eval_every,
+            eval_episodes=args.eval_episodes,
             num_envs=max(1, args.num_envs),
             vector=args.vector,
         ),
@@ -135,9 +208,14 @@ def config_from_train_args(args) -> AppConfig:
 
 
 def config_from_play_args(args) -> AppConfig:
+    env_config = EnvConfig(render_mode=args.render_mode, movement=args.movement)
+    save_root = args.save_root if args.flat_save_root else compatible_save_root(args.save_root, env_config)
+
+    checkpoint = args.checkpoint or save_root / "latest.chkpt"
+
     return AppConfig(
-        env=EnvConfig(render_mode=args.render_mode),
+        env=env_config,
         agent=AgentConfig(exploration_rate=0.0, exploration_rate_min=0.0),
-        artifacts=ArtifactConfig(save_root=args.save_root, checkpoint=args.checkpoint, resume=True),
+        artifacts=ArtifactConfig(save_root=save_root, checkpoint=checkpoint, resume=True),
         training=TrainingConfig(episodes=args.episodes),
     )

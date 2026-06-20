@@ -1,6 +1,7 @@
 import numpy as np
 from tqdm import tqdm
 
+from mad_mario.training.evaluation import evaluate_agent
 from mad_mario.training.progress import TrainingProgress, recent_metric_buffers, rolling_mean
 
 
@@ -24,6 +25,22 @@ def should_record(episode, record_every):
     return episode > 0 and episode % record_every == 0
 
 
+def should_eval(episode, eval_every):
+    return eval_every > 0 and episode > 0 and episode % eval_every == 0
+
+
+def run_evaluation(agent, checkpoint_manager, config, best_eval_reward):
+    result = evaluate_agent(agent, config)
+    tqdm.write(
+        f"评估结果 | 平均奖励={result.mean_reward:.3f} | "
+        f"平均长度={result.mean_length:.3f} | 通关率={result.flag_rate:.3f}"
+    )
+    if result.mean_reward > best_eval_reward:
+        best_eval_reward = result.mean_reward
+        checkpoint_manager.save_best(agent, result.mean_reward, episode=agent.current_episode)
+    return best_eval_reward
+
+
 def should_save_step(agent, next_save_step):
     return agent.curr_step >= next_save_step
 
@@ -32,6 +49,7 @@ def train_single_env_loop(env, agent, logger, checkpoint_manager, config):
     completed_episodes = agent.loaded_episode
     next_save_step = _next_interval_step(agent.curr_step, config.artifacts.save_every)
     progress = TrainingProgress(config.training.episodes, initial=completed_episodes, desc="训练进度")
+    best_eval_reward = float("-inf")
 
     try:
         while completed_episodes < config.training.episodes:
@@ -68,13 +86,18 @@ def train_single_env_loop(env, agent, logger, checkpoint_manager, config):
             progress.update(1)
             progress.set_single_status(agent, ep_reward, ep_length, last_loss, last_q)
 
-            if should_record(completed_episodes, config.training.record_every):
-                logger.record(
-                    episode=completed_episodes,
-                    epsilon=agent.exploration_rate,
-                    step=agent.curr_step,
-                )
+            emit_record = should_record(completed_episodes, config.training.record_every)
+            logger.record(
+                episode=completed_episodes,
+                epsilon=agent.exploration_rate,
+                step=agent.curr_step,
+                emit=emit_record,
+            )
+            if emit_record:
                 checkpoint_manager.save(agent, episode=completed_episodes)
+
+            if should_eval(completed_episodes, config.training.eval_every):
+                best_eval_reward = run_evaluation(agent, checkpoint_manager, config, best_eval_reward)
 
         checkpoint_manager.save(agent, episode=completed_episodes)
     except KeyboardInterrupt:
@@ -95,6 +118,7 @@ def train_vector_env_loop(envs, states, agent, logger, checkpoint_manager, confi
     last_loss = None
     last_q = None
     progress = TrainingProgress(config.training.episodes, initial=completed_episodes, desc="并行训练进度")
+    best_eval_reward = float("-inf")
 
     try:
         while completed_episodes < config.training.episodes:
@@ -137,13 +161,18 @@ def train_vector_env_loop(envs, states, agent, logger, checkpoint_manager, confi
                 ep_rewards[env_index] = 0.0
                 ep_lengths[env_index] = 0
 
-                if should_record(completed_episodes, config.training.record_every):
-                    logger.record(
-                        episode=completed_episodes,
-                        epsilon=agent.exploration_rate,
-                        step=agent.curr_step,
-                    )
+                emit_record = should_record(completed_episodes, config.training.record_every)
+                logger.record(
+                    episode=completed_episodes,
+                    epsilon=agent.exploration_rate,
+                    step=agent.curr_step,
+                    emit=emit_record,
+                )
+                if emit_record:
                     checkpoint_manager.save(agent, episode=completed_episodes)
+
+                if should_eval(completed_episodes, config.training.eval_every):
+                    best_eval_reward = run_evaluation(agent, checkpoint_manager, config, best_eval_reward)
 
                 if completed_episodes >= config.training.episodes:
                     break

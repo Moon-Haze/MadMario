@@ -20,9 +20,9 @@ curl -LsSf https://astral.sh/uv/install.sh | sh
 
 Choose one of the following options based on your hardware:
 
-| Option | Command | Description |
-|--------|---------|-------------|
-| **CPU only** | `uv sync --extra cpu` | For CPU-only training |
+| Option        | Command                 | Description                    |
+| ------------- | ----------------------- | ------------------------------ |
+| **CPU only**  | `uv sync --extra cpu`   | For CPU-only training          |
 | **CUDA 12.6** | `uv sync --extra cu126` | For NVIDIA GPUs with CUDA 12.6 |
 | **CUDA 13.0** | `uv sync --extra cu130` | For NVIDIA GPUs with CUDA 13.0 |
 | **CUDA 13.2** | `uv sync --extra cu132` | For NVIDIA GPUs with CUDA 13.2 |
@@ -99,10 +99,10 @@ Default output keeps only the latest training artifacts:
 checkpoints/
   latest.chkpt
   latest_metrics.csv
-  latest_reward_plot.png
-  latest_length_plot.png
-  latest_loss_plot.png
-  latest_q_plot.png
+  latest_reward.png
+  latest_length.png
+  latest_loss.png
+  latest_q.png
 ```
 
 With `--keep-runs`, the trainer also writes a per-run copy:
@@ -111,30 +111,30 @@ With `--keep-runs`, the trainer also writes a per-run copy:
 checkpoints/runs/<timestamp>/
   checkpoint.chkpt
   metrics.csv
-  reward_plot.png
-  length_plot.png
-  loss_plot.png
-  q_plot.png
+  reward.png
+  length.png
+  loss.png
+  q.png
 ```
 
 The trainer no longer creates many `mario_net_step_*.chkpt` backup files. Each target location keeps one current checkpoint.
 
 ## Project Structure
 
-| Path | Description |
-|------|-------------|
-| `src/mad_mario/cli.py` | Unified CLI for training and playback |
-| `src/mad_mario/config.py` | Dataclass configs and CLI argument parsing |
-| `src/mad_mario/agent/mario.py` | Agent behavior: action selection, replay caching, DQN updates |
-| `src/mad_mario/agent/checkpoint.py` | Checkpoint loading and saving |
-| `src/mad_mario/agent/replay_buffer.py` | Experience replay buffer |
-| `src/mad_mario/env/factory.py` | Mario environment and vector environment creation |
-| `src/mad_mario/env/wrappers.py` | Environment preprocessing wrappers |
-| `src/mad_mario/models/mario_net.py` | Q-value CNN model |
-| `src/mad_mario/training/trainer.py` | Training component assembly |
-| `src/mad_mario/training/loops.py` | Single-env and vector-env training loops |
-| `src/mad_mario/training/artifacts.py` | latest/runs output path management |
-| `src/mad_mario/logging/metrics.py` | CSV metrics and plot generation |
+| Path                                   | Description                                                   |
+| -------------------------------------- | ------------------------------------------------------------- |
+| `src/mad_mario/cli.py`                 | Unified CLI for training and playback                         |
+| `src/mad_mario/config.py`              | Dataclass configs and CLI argument parsing                    |
+| `src/mad_mario/agent/mario.py`         | Agent behavior: action selection, replay caching, DQN updates |
+| `src/mad_mario/agent/checkpoint.py`    | Checkpoint loading and saving                                 |
+| `src/mad_mario/agent/replay_buffer.py` | Experience replay buffer                                      |
+| `src/mad_mario/env/factory.py`         | Mario environment and vector environment creation             |
+| `src/mad_mario/env/wrappers.py`        | Environment preprocessing wrappers                            |
+| `src/mad_mario/models/mario_net.py`    | Q-value CNN model                                             |
+| `src/mad_mario/training/trainer.py`    | Training component assembly                                   |
+| `src/mad_mario/training/loops.py`      | Single-env and vector-env training loops                      |
+| `src/mad_mario/training/artifacts.py`  | latest/runs output path management                            |
+| `src/mad_mario/logging/metrics.py`     | CSV metrics and plot generation                               |
 
 Source code uses the `src/` layout. New code should import from `mad_mario` directly. The old root-level training/import shims have been removed.
 
