@@ -1,4 +1,3 @@
-
 # MadMario
 
 PyTorch implementation based on the [official tutorial](https://pytorch.org/tutorials/intermediate/mario_rl_tutorial.html) to build an AI-powered Mario using Deep Reinforcement Learning.
@@ -31,56 +30,121 @@ Choose one of the following options based on your hardware:
 ### 3. Activate Environment
 
 ```bash
-# Activate the virtual environment
-.venv\Scripts\activate  # Windows
-source .venv/bin/activate  # macOS/Linux
+# Windows
+.venv\Scripts\activate
+
+# macOS/Linux
+source .venv/bin/activate
 ```
 
 ## Running
 
 ### Train Mario
 
-To start the **training** process for Mario:
+Single environment training:
 
 ```bash
-python main.py
+python -m mad_mario.cli train
 ```
 
-This starts the *Double Q-learning* algorithm and logs key training metrics to `checkpoints/`. A copy of `MarioNet` and current exploration rate will be saved automatically.
-
-- **GPU** will be used automatically if available
-- Training time: ~20 hours on GPU, ~80 hours on CPU
-
-### Evaluate a Trained Mario
-
-To **evaluate** a trained Mario:
+Vectorized training:
 
 ```bash
-python replay.py
+python -m mad_mario.cli train --vector
 ```
 
-This visualizes Mario playing the game in a window. Performance metrics will be logged to a new folder under `checkpoints/`.
+Common options:
 
-To evaluate a specific checkpoint, modify the `load_dir` path in `Mario.load()` (e.g., `checkpoints/2020-06-06T22-00-00`).
+```bash
+python -m mad_mario.cli train \
+  --episodes 40000 \
+  --vector \
+  --num-envs 8 \
+  --record-every 20 \
+  --save-every 500000
+```
+
+By default, training resumes from `checkpoints/latest.chkpt` if it exists. To start from scratch:
+
+```bash
+python -m mad_mario.cli train --no-resume
+```
+
+To keep a timestamped copy of the current run in addition to the latest files:
+
+```bash
+python -m mad_mario.cli train --keep-runs
+```
+
+If the project is installed, the console script is also available:
+
+```bash
+mad-mario train
+mad-mario train --vector
+```
+
+### Play a Trained Mario
+
+```bash
+python -m mad_mario.cli play --checkpoint checkpoints/latest.chkpt
+```
+
+The play command uses `rgb_array` rendering by default and displays frames through matplotlib, which works around common `nes-py` human-window issues on Windows + Python 3.13.
+
+## Output Files
+
+Default output keeps only the latest training artifacts:
+
+```text
+checkpoints/
+  latest.chkpt
+  latest_metrics.csv
+  latest_reward_plot.png
+  latest_length_plot.png
+  latest_loss_plot.png
+  latest_q_plot.png
+```
+
+With `--keep-runs`, the trainer also writes a per-run copy:
+
+```text
+checkpoints/runs/<timestamp>/
+  checkpoint.chkpt
+  metrics.csv
+  reward_plot.png
+  length_plot.png
+  loss_plot.png
+  q_plot.png
+```
+
+The trainer no longer creates many `mario_net_step_*.chkpt` backup files. Each target location keeps one current checkpoint.
 
 ## Project Structure
 
-| File | Description |
+| Path | Description |
 |------|-------------|
-| **main.py** | Main loop between Environment and Mario agent |
-| **agent.py** | Defines agent behavior: experience collection, action selection, policy updates |
-| **wrappers.py** | Environment pre-processing (observation resizing, RGB to grayscale, etc.) |
-| **neural.py** | Q-value estimator using convolutional neural networks |
-| **metrics.py** | `MetricLogger` for tracking training/evaluation performance |
-| **tutorial.ipynb** | Interactive tutorial with detailed explanations |
+| `mad_mario/cli.py` | Unified CLI for training and playback |
+| `mad_mario/config.py` | Dataclass configs and CLI argument parsing |
+| `mad_mario/agent/mario.py` | Agent behavior: action selection, replay caching, DQN updates |
+| `mad_mario/agent/checkpoint.py` | Checkpoint loading and saving |
+| `mad_mario/agent/replay_buffer.py` | Experience replay buffer |
+| `mad_mario/env/factory.py` | Mario environment and vector environment creation |
+| `mad_mario/env/wrappers.py` | Environment preprocessing wrappers |
+| `mad_mario/models/mario_net.py` | Q-value CNN model |
+| `mad_mario/training/trainer.py` | Training component assembly |
+| `mad_mario/training/loops.py` | Single-env and vector-env training loops |
+| `mad_mario/training/artifacts.py` | latest/runs output path management |
+| `mad_mario/logging/metrics.py` | CSV metrics and plot generation |
+
+Root-level files such as `main.py`, `agent.py`, and `trainer.py` are compatibility shims. New code should import from `mad_mario` directly.
 
 ## Key Metrics
 
-During training, the following metrics are tracked (moving average over past 100 episodes):
+During training, the following metrics are tracked as moving averages over recent episodes:
 
 - **Episode**: Current episode number
-- **Step**: Total number of steps Mario has played
-- **Epsilon**: Current exploration rate (ε-greedy policy)
+- **Step**: Total number of environment steps Mario has played
+- **Epsilon**: Current exploration rate for the ε-greedy policy
 - **MeanReward**: Average reward per episode
 - **MeanLength**: Average episode length
 - **MeanLoss**: Average training loss

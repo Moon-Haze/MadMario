@@ -12,6 +12,9 @@ dependencies = [
     "scipy>=1.17.1",
 ]
 
+[project.scripts]
+mad-mario = "mad_mario.cli:main"
+
 [project.optional-dependencies]
 cpu = [
     "torch>=2.12.1",
