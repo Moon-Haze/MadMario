@@ -123,20 +123,20 @@ The trainer no longer creates many `mario_net_step_*.chkpt` backup files. Each t
 
 | Path | Description |
 |------|-------------|
-| `mad_mario/cli.py` | Unified CLI for training and playback |
-| `mad_mario/config.py` | Dataclass configs and CLI argument parsing |
-| `mad_mario/agent/mario.py` | Agent behavior: action selection, replay caching, DQN updates |
-| `mad_mario/agent/checkpoint.py` | Checkpoint loading and saving |
-| `mad_mario/agent/replay_buffer.py` | Experience replay buffer |
-| `mad_mario/env/factory.py` | Mario environment and vector environment creation |
-| `mad_mario/env/wrappers.py` | Environment preprocessing wrappers |
-| `mad_mario/models/mario_net.py` | Q-value CNN model |
-| `mad_mario/training/trainer.py` | Training component assembly |
-| `mad_mario/training/loops.py` | Single-env and vector-env training loops |
-| `mad_mario/training/artifacts.py` | latest/runs output path management |
-| `mad_mario/logging/metrics.py` | CSV metrics and plot generation |
+| `src/mad_mario/cli.py` | Unified CLI for training and playback |
+| `src/mad_mario/config.py` | Dataclass configs and CLI argument parsing |
+| `src/mad_mario/agent/mario.py` | Agent behavior: action selection, replay caching, DQN updates |
+| `src/mad_mario/agent/checkpoint.py` | Checkpoint loading and saving |
+| `src/mad_mario/agent/replay_buffer.py` | Experience replay buffer |
+| `src/mad_mario/env/factory.py` | Mario environment and vector environment creation |
+| `src/mad_mario/env/wrappers.py` | Environment preprocessing wrappers |
+| `src/mad_mario/models/mario_net.py` | Q-value CNN model |
+| `src/mad_mario/training/trainer.py` | Training component assembly |
+| `src/mad_mario/training/loops.py` | Single-env and vector-env training loops |
+| `src/mad_mario/training/artifacts.py` | latest/runs output path management |
+| `src/mad_mario/logging/metrics.py` | CSV metrics and plot generation |
 
-Root-level files such as `main.py`, `agent.py`, and `trainer.py` are compatibility shims. New code should import from `mad_mario` directly.
+Source code uses the `src/` layout. New code should import from `mad_mario` directly. The old root-level training/import shims have been removed.
 
 ## Key Metrics
 
