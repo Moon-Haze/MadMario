@@ -1,18 +1,18 @@
 import torch
-import random, numpy as np
-from pathlib import Path
+import numpy as np
 
 from neural import MarioNet
-from collections import deque
+from replay_buffer import ReplayBuffer
 from tqdm import tqdm
 
 
 class Mario:
-    def __init__(self, state_dim, action_dim, save_dir, checkpoint=None):
+    def __init__(self, state_dim, action_dim, save_dir, checkpoint=None, config=None):
         self.state_dim = state_dim
         self.action_dim = action_dim
-        self.memory = deque(maxlen=100000)
-        self.batch_size = 32
+        self.batch_size = config.batch_size if config else 32
+        replay_capacity = config.replay_capacity if config else 100000
+        self.memory = ReplayBuffer(replay_capacity)
 
         self.exploration_rate = 1
         self.exploration_rate_decay = 0.99999975
@@ -22,11 +22,11 @@ class Mario:
         self.curr_step = 0
         self.current_episode = 0
         self.loaded_episode = 0
-        self.burnin = int(1e5)  # 训练前至少需要收集的经验数量
-        self.learn_every = 3   # 每隔多少条经验更新一次 Q_online
-        self.sync_every = int(1e4)   # 每隔多少条经验同步一次 Q_target 和 Q_online
+        self.burnin = config.burnin if config else int(1e5)  # 训练前至少需要收集的经验数量
+        self.learn_every = config.learn_every if config else 3   # 每隔多少条经验更新一次 Q_online
+        self.sync_every = config.sync_every if config else int(1e4)   # 每隔多少条经验同步一次 Q_target 和 Q_online
 
-        self.save_every = int(5e5)   # 每隔多少条经验保存一次 MarioNet
+        self.save_every = config.save_every if config else int(5e5)   # 每隔多少条经验保存一次 MarioNet
         self.save_dir = save_dir
         self.next_learn_step = self._next_interval_step(self.burnin, self.learn_every)
         self.next_sync_step = self.sync_every
@@ -91,10 +91,7 @@ class Mario:
         reward (float),
         done(bool))
         """
-        state = np.array(state, copy=True)
-        next_state = np.array(next_state, copy=True)
-
-        self.memory.append( (state, next_state, action, reward, done,) )
+        self.memory.push(state, next_state, action, reward, done)
 
 
     def cache_batch(self, states, next_states, actions, rewards, dones):
@@ -113,14 +110,7 @@ class Mario:
         """
         从记忆中取回一批经验
         """
-        batch = random.sample(self.memory, self.batch_size)
-        state, next_state, action, reward, done = zip(*batch)
-        state = torch.as_tensor(np.array(state), dtype=torch.float32, device=self.device)
-        next_state = torch.as_tensor(np.array(next_state), dtype=torch.float32, device=self.device)
-        action = torch.as_tensor(action, dtype=torch.long, device=self.device)
-        reward = torch.as_tensor(reward, dtype=torch.float32, device=self.device)
-        done = torch.as_tensor(done, dtype=torch.bool, device=self.device)
-        return state, next_state, action, reward, done
+        return self.memory.sample(self.batch_size, self.device)
 
 
     def td_estimate(self, state, action):
@@ -201,8 +191,8 @@ class Mario:
             episode=self.current_episode,
             save_dir=str(self.save_dir),
         )
-        save_path = self.save_dir / f"mario_net_{int(self.curr_step // self.save_every)}.chkpt"
-        latest_path = Path("checkpoints") / "latest.chkpt"
+        save_path = self.save_dir / f"mario_net_step_{self.curr_step}_ep_{self.current_episode}.chkpt"
+        latest_path = self.save_dir.parent / "latest.chkpt"
         latest_path.parent.mkdir(parents=True, exist_ok=True)
 
         torch.save(checkpoint, save_path)
@@ -220,11 +210,6 @@ class Mario:
         optimizer_state = ckp.get('optimizer')
         curr_step = ckp.get('curr_step', 0)
         episode = ckp.get('episode', 0)
-        saved_save_dir = ckp.get('save_dir')
-        if saved_save_dir:
-            self.save_dir = Path(saved_save_dir)
-            self.save_dir.mkdir(parents=True, exist_ok=True)
-
         tqdm.write(f"正在加载模型 {load_path}，探索率为 {exploration_rate:.4f}，步数为 {curr_step}，回合为 {episode}")
         self.net.load_state_dict(state_dict)
         if optimizer_state is not None:

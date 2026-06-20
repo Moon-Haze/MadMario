@@ -3,32 +3,16 @@ from pathlib import Path
 
 os.environ["KMP_DUPLICATE_LIB_OK"] = "True"
 
-import gym_super_mario_bros
 import matplotlib.pyplot as plt
 from tqdm import tqdm
-from gym_super_mario_bros.actions import COMPLEX_MOVEMENT
-from gymnasium.wrappers import FrameStackObservation as FrameStack
-from gymnasium.wrappers import GrayscaleObservation as GrayScaleObservation
-from nes_py.wrappers import JoypadSpace
 
 from agent import Mario
-from wrappers import NormalizeObservation, ResizeObservation, SkipFrame
+from env_factory import make_mario_env
 
 
 # Windows + Python 3.13 下 nes-py 自带的 pyglet human 窗口可能会报错。
 # 这里用 rgb_array 取画面，再用 matplotlib 打开窗口显示。
-env = gym_super_mario_bros.make("SuperMarioBros-1-1-v0", render_mode="rgb_array")
-
-# 动作空间必须和训练时保持一致。
-# 注意：这里使用 COMPLEX_MOVEMENT 后，旧的 trained_mario.chkpt（2 动作检查点）不能直接加载。
-env = JoypadSpace(env, COMPLEX_MOVEMENT)
-
-# 观测预处理必须和训练时保持一致
-env = SkipFrame(env, skip=4)
-env = GrayScaleObservation(env, keep_dim=False)
-env = ResizeObservation(env, shape=84)
-env = NormalizeObservation(env)
-env = FrameStack(env, stack_size=4)
+env = make_mario_env(render_mode="rgb_array")
 
 # 加载训练好的模型
 mario = Mario(
