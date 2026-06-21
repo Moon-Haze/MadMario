@@ -52,9 +52,7 @@ def play(config):
     fig.canvas.mpl_connect("close_event", on_close)
 
     try:
-        for episode in range(1, config.training.episodes + 1):
-            if not window_open:
-                break
+        if window_open:
             state, _ = env.reset()
             total_reward = 0.0
             step = 0
