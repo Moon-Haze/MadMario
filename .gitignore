@@ -2,7 +2,8 @@
 **/checkpoints
 *.npy
 uv.lock
-video/**
-.history/**
-docs/superpowers/**
-.claude/**
+video/
+.history/
+docs/superpowers/
+.claude/
+src/madmario.egg-info/

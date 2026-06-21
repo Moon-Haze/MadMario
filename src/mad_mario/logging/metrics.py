@@ -4,6 +4,7 @@ from pathlib import Path
 
 import matplotlib.pyplot as plt
 import numpy as np
+from torch.utils.tensorboard import SummaryWriter
 from tqdm import tqdm
 
 
@@ -22,7 +23,7 @@ plt.rcParams["axes.unicode_minus"] = False
 
 
 class MetricLogger:
-    def __init__(self, csv_paths: list[Path], plot_path_groups: list[list[Path]], reset: bool = False):
+    def __init__(self, csv_paths: list[Path], plot_path_groups: list[list[Path]], reset: bool = False, tensorboard_dir: Path | None = None):
         self.csv_paths = csv_paths
         self.plot_path_groups = plot_path_groups
 
@@ -30,6 +31,13 @@ class MetricLogger:
             self._clear_outputs()
         for csv_path in self.csv_paths:
             self._ensure_csv_header(csv_path)
+
+        if tensorboard_dir is not None:
+            tensorboard_dir = Path(tensorboard_dir)
+            tensorboard_dir.mkdir(parents=True, exist_ok=True)
+            self.writer = SummaryWriter(log_dir=str(tensorboard_dir))
+        else:
+            self.writer = None
 
         self.ep_rewards = []
         self.ep_lengths = []
@@ -179,6 +187,17 @@ class MetricLogger:
             with open(csv_path, "a", newline="", encoding="utf-8") as f:
                 csv.writer(f).writerow(row)
 
+        if self.writer is not None:
+            self.writer.add_scalar("train/reward", mean_ep_reward, episode)
+            self.writer.add_scalar("train/length", mean_ep_length, episode)
+            self.writer.add_scalar("train/loss", mean_ep_loss, episode)
+            self.writer.add_scalar("train/q_value", mean_ep_q, episode)
+            self.writer.add_scalar("train/epsilon", epsilon, step)
+            self.writer.add_scalar("progress/max_x_pos", mean_max_x_pos, episode)
+            self.writer.add_scalar("action/noop_rate", mean_noop_rate, episode)
+            self.writer.add_scalar("action/most_used", int(mean_most_used_action), episode)
+            self.writer.flush()
+
         if not emit:
             return
 
@@ -198,6 +217,11 @@ class MetricLogger:
 
         for plot_paths in self.plot_path_groups:
             self._write_plots(plot_paths)
+
+    def close(self):
+        if self.writer is not None:
+            self.writer.close()
+            self.writer = None
 
     def _write_plots(self, plot_paths):
         for moving_avg, plot_path, (title, xlabel, ylabel) in zip(
