@@ -156,7 +156,7 @@ def add_train_args(parser: argparse.ArgumentParser) -> None:
 
 def add_play_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--checkpoint", type=Path, default=None, help="要播放的 checkpoint")
-    parser.add_argument("--episodes", type=int, default=5, help="播放回合数")
+    parser.add_argument("--episodes", type=int, default=1, help="播放回合数")
     parser.add_argument(
         "--movement",
         choices=("right_only", "simple", "complex"),

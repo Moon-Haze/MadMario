@@ -3,7 +3,6 @@ import os
 os.environ["KMP_DUPLICATE_LIB_OK"] = "True"
 
 import matplotlib.pyplot as plt
-from tqdm import tqdm
 
 from mad_mario.agent.checkpoint import CheckpointManager
 from mad_mario.agent.mario import Mario
@@ -45,8 +44,7 @@ def play(config):
     fig.canvas.manager.set_window_title("训练好的 Mario")
 
     try:
-        progress_bar = tqdm(range(1, config.training.episodes + 1), desc="播放进度", unit="回合")
-        for episode in progress_bar:
+        for episode in range(1, config.training.episodes + 1):
             state, _ = env.reset()
             total_reward = 0.0
             step = 0
@@ -71,12 +69,7 @@ def play(config):
 
                 if done or info.get("flag_get"):
                     flag_get = bool(info.get("flag_get", False))
-                    progress_bar.set_postfix({
-                        "步数": step,
-                        "奖励": f"{total_reward:.1f}",
-                        "通关": flag_get,
-                    })
-                    tqdm.write(
+                    print(
                         f"第 {episode} 回合结束："
                         f"步数={step}，奖励={total_reward:.1f}，是否通关={flag_get}"
                     )
