@@ -35,7 +35,6 @@ def train_single(config: AppConfig, artifacts):
         artifacts.metrics_csv_paths,
         artifacts.plot_path_groups,
         reset=loaded_checkpoint is None,
-        tensorboard_dir=artifacts.save_root / "tensorboard",
     )
     train_single_env_loop(env, agent, logger, checkpoint_manager, config)
 
@@ -50,6 +49,5 @@ def train_vector(config: AppConfig, artifacts):
         artifacts.metrics_csv_paths,
         artifacts.plot_path_groups,
         reset=loaded_checkpoint is None,
-        tensorboard_dir=artifacts.save_root / "tensorboard",
     )
     train_vector_env_loop(envs, states, agent, logger, checkpoint_manager, config)
