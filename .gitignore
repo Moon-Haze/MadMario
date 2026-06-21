@@ -5,3 +5,5 @@ uv.lock
 video/**
 .history/**
 docs/superpowers/**
+.claude/**
+.claude/settings.json

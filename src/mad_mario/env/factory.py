@@ -7,7 +7,7 @@ from gymnasium.wrappers import FrameStackObservation as FrameStack, GrayscaleObs
 from nes_py.wrappers import JoypadSpace
 
 from mad_mario.config import EnvConfig
-from mad_mario.env.wrappers import ClipReward, NormalizeObservation, ResizeObservation, SkipFrame
+from mad_mario.env.wrappers import ClipReward, NormalizeObservation, ResizeObservation, SkipFrame, StuckPenalty
 
 
 MOVEMENT_ACTIONS = {
@@ -31,6 +31,12 @@ def make_mario_env(config: EnvConfig | None = None, render_mode=None):
     env = SkipFrame(env, skip=config.frame_skip)
     if config.clip_rewards:
         env = ClipReward(env, clip_value=config.reward_clip_value)
+    if config.stuck_penalty_enabled:
+        env = StuckPenalty(
+            env,
+            max_stuck_steps=config.stuck_max_steps,
+            penalty=config.stuck_penalty,
+        )
     env = GrayScaleObservation(env, keep_dim=False)
     env = ResizeObservation(env, shape=config.resize_shape)
     if config.normalize_observation:

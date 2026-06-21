@@ -51,6 +51,68 @@ class ClipReward(gym.Wrapper):
         return obs, reward, terminated, truncated, info
 
 
+class StuckPenalty(gym.Wrapper):
+    def __init__(self, env, max_stuck_steps, penalty, movement_epsilon=0.0):
+        super().__init__(env)
+        self.max_stuck_steps = int(max_stuck_steps)
+        self.penalty = float(penalty)
+        self.movement_epsilon = float(movement_epsilon)
+        self.last_x_pos = None
+        self.last_y_pos = None
+        self.max_x_pos = 0.0
+        self.stuck_steps = 0
+
+    def reset(self, **kwargs):
+        obs, info = self.env.reset(**kwargs)
+        info = dict(info)
+        self.last_x_pos = self._position_value(info.get("x_pos"))
+        self.last_y_pos = self._position_value(info.get("y_pos"))
+        self.max_x_pos = self.last_x_pos if self.last_x_pos is not None else 0.0
+        self.stuck_steps = 0
+        info["max_x_pos"] = self.max_x_pos
+        info["stuck_steps"] = self.stuck_steps
+        return obs, info
+
+    def step(self, action):
+        obs, reward, terminated, truncated, info = self.env.step(action)
+        info = dict(info)
+        x_pos = self._position_value(info.get("x_pos"))
+        y_pos = self._position_value(info.get("y_pos"))
+
+        if x_pos is not None:
+            self.max_x_pos = max(self.max_x_pos, x_pos)
+
+        if x_pos is not None and y_pos is not None:
+            if self.last_x_pos is None or self.last_y_pos is None:
+                moved = True
+            else:
+                moved = (
+                    abs(x_pos - self.last_x_pos) > self.movement_epsilon
+                    or abs(y_pos - self.last_y_pos) > self.movement_epsilon
+                )
+
+            if moved:
+                self.stuck_steps = 0
+                self.last_x_pos = x_pos
+                self.last_y_pos = y_pos
+            else:
+                self.stuck_steps += 1
+
+            if self.stuck_steps >= self.max_stuck_steps and not terminated and not truncated:
+                reward = float(reward) - self.penalty
+                truncated = True
+                info["stuck"] = True
+
+        info["max_x_pos"] = self.max_x_pos
+        info["stuck_steps"] = self.stuck_steps
+        return obs, reward, terminated, truncated, info
+
+    def _position_value(self, value):
+        if value is None:
+            return None
+        return float(value)
+
+
 class NormalizeObservation(gym.ObservationWrapper):
     """将观测从 uint8 [0, 255] 归一化为 float32 [0, 1]。"""
 

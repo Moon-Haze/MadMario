@@ -18,6 +18,9 @@ class EnvConfig:
     movement: str = "right_only"
     clip_rewards: bool = True
     reward_clip_value: float = 1.0
+    stuck_penalty_enabled: bool = True
+    stuck_max_steps: int = 120
+    stuck_penalty: float = 5.0
     normalize_observation: bool = False
 
 
@@ -145,6 +148,9 @@ def add_train_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--per-epsilon", type=float, default=AgentConfig.per_epsilon, help="PER priority epsilon")
     parser.add_argument("--no-reward-clip", action="store_true", help="关闭奖励裁剪")
     parser.add_argument("--reward-clip-value", type=float, default=EnvConfig.reward_clip_value, help="奖励裁剪绝对值")
+    parser.add_argument("--no-stuck-penalty", action="store_true", help="关闭卡住惩罚与提前截断")
+    parser.add_argument("--stuck-max-steps", type=int, default=EnvConfig.stuck_max_steps, help="连续多少步无位移后判定卡住")
+    parser.add_argument("--stuck-penalty", type=float, default=EnvConfig.stuck_penalty, help="卡住时额外扣除的奖励")
     parser.add_argument("--normalize-observation", action="store_true", help="在环境层归一化观测（默认保持 uint8）")
 
 
@@ -167,6 +173,9 @@ def config_from_train_args(args) -> AppConfig:
         movement=args.movement,
         clip_rewards=not args.no_reward_clip,
         reward_clip_value=args.reward_clip_value,
+        stuck_penalty_enabled=not args.no_stuck_penalty,
+        stuck_max_steps=max(1, args.stuck_max_steps),
+        stuck_penalty=args.stuck_penalty,
         normalize_observation=args.normalize_observation,
     )
     save_root = args.save_root if args.flat_save_root else compatible_save_root(args.save_root, env_config)

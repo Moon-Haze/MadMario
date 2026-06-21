@@ -1,3 +1,5 @@
+import warnings
+
 import numpy as np
 from tqdm import tqdm
 
@@ -50,12 +52,14 @@ def train_single_env_loop(env, agent, logger, checkpoint_manager, config):
     next_save_step = _next_interval_step(agent.curr_step, config.artifacts.save_every)
     progress = TrainingProgress(config.training.episodes, initial=completed_episodes, desc="训练进度")
     best_eval_reward = float("-inf")
+    interrupted = False
 
     try:
         while completed_episodes < config.training.episodes:
             state, _ = env.reset()
             ep_reward = 0.0
             ep_length = 0
+            ep_max_x_pos = 0.0
             last_loss = None
             last_q = None
 
@@ -68,6 +72,7 @@ def train_single_env_loop(env, agent, logger, checkpoint_manager, config):
                 logger.log_step(reward, loss, q)
                 ep_reward += reward
                 ep_length += 1
+                ep_max_x_pos = max(ep_max_x_pos, _info_float(info, "max_x_pos", _info_float(info, "x_pos", 0.0)))
                 if loss is not None:
                     last_loss = loss
                     last_q = q
@@ -82,7 +87,7 @@ def train_single_env_loop(env, agent, logger, checkpoint_manager, config):
 
             completed_episodes += 1
             agent.current_episode = completed_episodes
-            logger.log_episode()
+            logger.log_episode(max_x_pos=ep_max_x_pos)
             progress.update(1)
             progress.set_single_status(agent, ep_reward, ep_length, last_loss, last_q)
 
@@ -101,12 +106,14 @@ def train_single_env_loop(env, agent, logger, checkpoint_manager, config):
 
         checkpoint_manager.save(agent, episode=completed_episodes)
     except KeyboardInterrupt:
-        tqdm.write("检测到训练中断，正在保存最新检查点...")
-        checkpoint_manager.save(agent, episode=agent.current_episode)
-        raise
+        interrupted = True
+        tqdm.write("检测到训练中断，跳过保存检查点...")
     finally:
         progress.close()
         env.close()
+
+    if interrupted:
+        tqdm.write("训练已中断，资源已清理。")
 
 
 def train_vector_env_loop(envs, states, agent, logger, checkpoint_manager, config):
@@ -114,11 +121,13 @@ def train_vector_env_loop(envs, states, agent, logger, checkpoint_manager, confi
     next_save_step = _next_interval_step(agent.curr_step, config.artifacts.save_every)
     ep_rewards = np.zeros(config.training.num_envs, dtype=np.float32)
     ep_lengths = np.zeros(config.training.num_envs, dtype=np.int32)
+    ep_max_x_positions = np.zeros(config.training.num_envs, dtype=np.float32)
     recent_losses, recent_qs, recent_rewards = recent_metric_buffers()
     last_loss = None
     last_q = None
     progress = TrainingProgress(config.training.episodes, initial=completed_episodes, desc="并行训练进度")
     best_eval_reward = float("-inf")
+    interrupted = False
 
     try:
         while completed_episodes < config.training.episodes:
@@ -130,6 +139,7 @@ def train_vector_env_loop(envs, states, agent, logger, checkpoint_manager, confi
             agent.cache_batch(states, replay_next_states, actions, rewards, dones)
             ep_rewards += rewards
             ep_lengths += 1
+            ep_max_x_positions = np.maximum(ep_max_x_positions, get_info_array(infos, "max_x_pos", get_info_array(infos, "x_pos", 0.0)))
 
             q, loss = agent.learn()
             if loss is not None:
@@ -155,11 +165,13 @@ def train_vector_env_loop(envs, states, agent, logger, checkpoint_manager, confi
                     int(ep_lengths[env_index]),
                     rolling_mean(recent_losses),
                     rolling_mean(recent_qs),
+                    float(ep_max_x_positions[env_index]),
                 )
                 progress.update(1)
 
                 ep_rewards[env_index] = 0.0
                 ep_lengths[env_index] = 0
+                ep_max_x_positions[env_index] = 0.0
 
                 emit_record = should_record(completed_episodes, config.training.record_every)
                 logger.record(
@@ -182,12 +194,42 @@ def train_vector_env_loop(envs, states, agent, logger, checkpoint_manager, confi
 
         checkpoint_manager.save(agent, episode=completed_episodes)
     except KeyboardInterrupt:
-        tqdm.write("检测到训练中断，正在保存最新检查点...")
-        checkpoint_manager.save(agent, episode=agent.current_episode)
-        raise
+        interrupted = True
+        tqdm.write("检测到训练中断，跳过保存检查点...")
     finally:
         progress.close()
+        close_vector_envs(envs, terminate=interrupted)
+
+    if interrupted:
+        tqdm.write("训练已中断，资源已清理。")
+
+
+def get_info_array(infos, key, default):
+    values = infos.get(key)
+    if values is None:
+        return default
+    return np.asarray(values, dtype=np.float32)
+
+
+def _info_float(info, key, default):
+    try:
+        return float(info.get(key, default))
+    except (TypeError, ValueError):
+        return float(default)
+
+
+def close_vector_envs(envs, terminate=False):
+    if not terminate:
         envs.close()
+        return
+
+    with warnings.catch_warnings():
+        warnings.filterwarnings(
+            "ignore",
+            message=".*Calling `close` while waiting for a pending call.*",
+            category=UserWarning,
+        )
+        envs.close(terminate=True)
 
 
 def _next_interval_step(current_step, interval):
