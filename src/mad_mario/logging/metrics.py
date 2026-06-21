@@ -36,8 +36,12 @@ class MetricLogger:
         self.ep_avg_losses = []
         self.ep_avg_qs = []
         self.ep_max_x_positions = []
+        self.ep_noop_rates = []
+        self.ep_most_used_actions = []
         self.moving_avgs = [[], [], [], []]
         self.max_x_pos_avgs = []
+        self.noop_rate_avgs = []
+        self.most_used_action_avgs = []
         if not reset:
             self._load_history_from_csv(self.csv_paths[0])
         self.init_episode()
@@ -67,6 +71,8 @@ class MetricLogger:
                 "mean_loss",
                 "mean_q",
                 "mean_max_x_pos",
+                "mean_noop_rate",
+                "mean_most_used_action",
                 "time_delta",
             ])
 
@@ -83,6 +89,8 @@ class MetricLogger:
                     self.moving_avgs[2].append(float(row["mean_loss"]))
                     self.moving_avgs[3].append(float(row["mean_q"]))
                     self.max_x_pos_avgs.append(float(row.get("mean_max_x_pos", 0.0)))
+                    self.noop_rate_avgs.append(float(row.get("mean_noop_rate", 0.0)))
+                    self.most_used_action_avgs.append(float(row.get("mean_most_used_action", 0.0)))
                 except (KeyError, TypeError, ValueError):
                     continue
 
@@ -94,7 +102,7 @@ class MetricLogger:
             self.curr_ep_q += q
             self.curr_ep_loss_length += 1
 
-    def log_episode(self, max_x_pos=0.0):
+    def log_episode(self, max_x_pos=0.0, noop_rate=0.0, most_used_action=0):
         """记录一个回合的结束。"""
         if self.curr_ep_loss_length == 0:
             ep_avg_loss = 0
@@ -102,16 +110,18 @@ class MetricLogger:
         else:
             ep_avg_loss = self._round_metric(self.curr_ep_loss / self.curr_ep_loss_length)
             ep_avg_q = self._round_metric(self.curr_ep_q / self.curr_ep_loss_length)
-        self.log_episode_metrics(self.curr_ep_reward, self.curr_ep_length, ep_avg_loss, ep_avg_q, max_x_pos)
+        self.log_episode_metrics(self.curr_ep_reward, self.curr_ep_length, ep_avg_loss, ep_avg_q, max_x_pos, noop_rate, most_used_action)
         self.init_episode()
 
-    def log_episode_metrics(self, ep_reward, ep_length, ep_avg_loss=0, ep_avg_q=0, max_x_pos=0.0):
+    def log_episode_metrics(self, ep_reward, ep_length, ep_avg_loss=0, ep_avg_q=0, max_x_pos=0.0, noop_rate=0.0, most_used_action=0):
         """记录一个已经统计完成的回合。"""
         self.ep_rewards.append(ep_reward)
         self.ep_lengths.append(ep_length)
         self.ep_avg_losses.append(ep_avg_loss)
         self.ep_avg_qs.append(ep_avg_q)
         self.ep_max_x_positions.append(float(max_x_pos))
+        self.ep_noop_rates.append(float(noop_rate))
+        self.ep_most_used_actions.append(int(most_used_action))
 
     def init_episode(self):
         self.curr_ep_reward = 0.0
@@ -137,7 +147,11 @@ class MetricLogger:
         mean_ep_loss = self._mean_last(self.ep_avg_losses)
         mean_ep_q = self._mean_last(self.ep_avg_qs)
         mean_max_x_pos = self._mean_last(self.ep_max_x_positions)
+        mean_noop_rate = self._mean_last(self.ep_noop_rates)
+        mean_most_used_action = self._mean_last(self.ep_most_used_actions)
         self.max_x_pos_avgs.append(mean_max_x_pos)
+        self.noop_rate_avgs.append(mean_noop_rate)
+        self.most_used_action_avgs.append(mean_most_used_action)
         for moving_avg, mean in zip(
             self.moving_avgs,
             [mean_ep_reward, mean_ep_length, mean_ep_loss, mean_ep_q],
@@ -157,6 +171,8 @@ class MetricLogger:
             mean_ep_loss,
             mean_ep_q,
             mean_max_x_pos,
+            mean_noop_rate,
+            mean_most_used_action,
             time_since_last_record,
         ]
         for csv_path in self.csv_paths:
@@ -175,6 +191,8 @@ class MetricLogger:
             f"平均损失={mean_ep_loss:.3f} | "
             f"平均 Q 值={mean_ep_q:.3f} | "
             f"平均最大 x={mean_max_x_pos:.3f} | "
+            f"平均 NOOP={mean_noop_rate:.3f} | "
+            f"常用动作={int(mean_most_used_action):d} | "
             f"时间间隔={time_since_last_record:.3f}"
         )
 

@@ -60,7 +60,7 @@ def play(config):
                 fig.canvas.flush_events()
                 plt.pause(0.001)
 
-                action = agent.act(state)
+                action = agent.act_eval(state)
                 state, reward, terminated, truncated, info = env.step(action)
                 done = terminated or truncated
 

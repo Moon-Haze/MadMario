@@ -31,16 +31,23 @@ def should_eval(episode, eval_every):
     return eval_every > 0 and episode > 0 and episode % eval_every == 0
 
 
-def run_evaluation(agent, checkpoint_manager, config, best_eval_reward):
+def run_evaluation(agent, checkpoint_manager, config, best_eval_score):
     result = evaluate_agent(agent, config)
     tqdm.write(
-        f"评估结果 | 平均奖励={result.mean_reward:.3f} | "
-        f"平均长度={result.mean_length:.3f} | 通关率={result.flag_rate:.3f}"
+        f"评估结果 | 分数={result.score:.3f} | 平均奖励={result.mean_reward:.3f} | "
+        f"平均长度={result.mean_length:.3f} | 平均最大 x={result.mean_max_x_pos:.3f} | 通关率={result.flag_rate:.3f}"
     )
-    if result.mean_reward > best_eval_reward:
-        best_eval_reward = result.mean_reward
-        checkpoint_manager.save_best(agent, result.mean_reward, episode=agent.current_episode)
-    return best_eval_reward
+    if result.score > best_eval_score:
+        best_eval_score = result.score
+        checkpoint_manager.save_best(
+            agent,
+            eval_score=result.score,
+            eval_reward=result.mean_reward,
+            eval_max_x_pos=result.mean_max_x_pos,
+            eval_flag_rate=result.flag_rate,
+            episode=agent.current_episode,
+        )
+    return best_eval_score
 
 
 def should_save_step(agent, next_save_step):
@@ -51,7 +58,7 @@ def train_single_env_loop(env, agent, logger, checkpoint_manager, config):
     completed_episodes = agent.loaded_episode
     next_save_step = _next_interval_step(agent.curr_step, config.artifacts.save_every)
     progress = TrainingProgress(config.training.episodes, initial=completed_episodes, desc="训练进度")
-    best_eval_reward = float("-inf")
+    best_eval_score = float("-inf")
     interrupted = False
 
     try:
@@ -60,6 +67,7 @@ def train_single_env_loop(env, agent, logger, checkpoint_manager, config):
             ep_reward = 0.0
             ep_length = 0
             ep_max_x_pos = 0.0
+            action_counts = np.zeros(agent.action_dim, dtype=np.int32)
             last_loss = None
             last_q = None
 
@@ -67,6 +75,7 @@ def train_single_env_loop(env, agent, logger, checkpoint_manager, config):
                 action = agent.act(state)
                 next_state, reward, terminated, truncated, info = env.step(action)
                 done = terminated or truncated
+                action_counts[action] += 1
                 agent.cache(state, next_state, action, reward, done)
                 q, loss = agent.learn()
                 logger.log_step(reward, loss, q)
@@ -87,7 +96,9 @@ def train_single_env_loop(env, agent, logger, checkpoint_manager, config):
 
             completed_episodes += 1
             agent.current_episode = completed_episodes
-            logger.log_episode(max_x_pos=ep_max_x_pos)
+            noop_rate = float(action_counts[0]) / max(1, ep_length)
+            most_used_action = int(np.argmax(action_counts))
+            logger.log_episode(max_x_pos=ep_max_x_pos, noop_rate=noop_rate, most_used_action=most_used_action)
             progress.update(1)
             progress.set_single_status(agent, ep_reward, ep_length, last_loss, last_q)
 
@@ -102,7 +113,7 @@ def train_single_env_loop(env, agent, logger, checkpoint_manager, config):
                 checkpoint_manager.save(agent, episode=completed_episodes)
 
             if should_eval(completed_episodes, config.training.eval_every):
-                best_eval_reward = run_evaluation(agent, checkpoint_manager, config, best_eval_reward)
+                best_eval_score = run_evaluation(agent, checkpoint_manager, config, best_eval_score)
 
         checkpoint_manager.save(agent, episode=completed_episodes)
     except KeyboardInterrupt:
@@ -122,11 +133,12 @@ def train_vector_env_loop(envs, states, agent, logger, checkpoint_manager, confi
     ep_rewards = np.zeros(config.training.num_envs, dtype=np.float32)
     ep_lengths = np.zeros(config.training.num_envs, dtype=np.int32)
     ep_max_x_positions = np.zeros(config.training.num_envs, dtype=np.float32)
+    ep_action_counts = np.zeros((config.training.num_envs, agent.action_dim), dtype=np.int32)
     recent_losses, recent_qs, recent_rewards = recent_metric_buffers()
     last_loss = None
     last_q = None
     progress = TrainingProgress(config.training.episodes, initial=completed_episodes, desc="并行训练进度")
-    best_eval_reward = float("-inf")
+    best_eval_score = float("-inf")
     interrupted = False
 
     try:
@@ -140,6 +152,8 @@ def train_vector_env_loop(envs, states, agent, logger, checkpoint_manager, confi
             ep_rewards += rewards
             ep_lengths += 1
             ep_max_x_positions = np.maximum(ep_max_x_positions, get_info_array(infos, "max_x_pos", get_info_array(infos, "x_pos", 0.0)))
+            for env_index, act in enumerate(actions):
+                ep_action_counts[env_index, act] += 1
 
             q, loss = agent.learn()
             if loss is not None:
@@ -160,18 +174,24 @@ def train_vector_env_loop(envs, states, agent, logger, checkpoint_manager, confi
                 agent.current_episode = completed_episodes
                 episode_reward = float(ep_rewards[env_index])
                 recent_rewards.append(episode_reward)
+                ep_length = int(ep_lengths[env_index])
+                noop_rate = float(ep_action_counts[env_index, 0]) / max(1, ep_length)
+                most_used_action = int(np.argmax(ep_action_counts[env_index]))
                 logger.log_episode_metrics(
                     episode_reward,
-                    int(ep_lengths[env_index]),
+                    ep_length,
                     rolling_mean(recent_losses),
                     rolling_mean(recent_qs),
                     float(ep_max_x_positions[env_index]),
+                    noop_rate,
+                    most_used_action,
                 )
                 progress.update(1)
 
                 ep_rewards[env_index] = 0.0
                 ep_lengths[env_index] = 0
                 ep_max_x_positions[env_index] = 0.0
+                ep_action_counts[env_index] = 0
 
                 emit_record = should_record(completed_episodes, config.training.record_every)
                 logger.record(
@@ -184,7 +204,7 @@ def train_vector_env_loop(envs, states, agent, logger, checkpoint_manager, confi
                     checkpoint_manager.save(agent, episode=completed_episodes)
 
                 if should_eval(completed_episodes, config.training.eval_every):
-                    best_eval_reward = run_evaluation(agent, checkpoint_manager, config, best_eval_reward)
+                    best_eval_score = run_evaluation(agent, checkpoint_manager, config, best_eval_score)
 
                 if completed_episodes >= config.training.episodes:
                     break

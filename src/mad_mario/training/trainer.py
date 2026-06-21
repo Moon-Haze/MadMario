@@ -17,6 +17,8 @@ def build_agent(config: AppConfig, action_dim):
 
 
 def train(config: AppConfig):
+    if config.env.movement != "right_only":
+        print("建议先用 --movement right_only 学会稳定向右，再尝试 simple/complex。")
     artifacts = create_artifacts(config.artifacts)
     if config.training.vector:
         train_vector(config, artifacts)

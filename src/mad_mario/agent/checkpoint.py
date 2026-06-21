@@ -57,17 +57,22 @@ class CheckpointManager:
             f"当前步数 {agent.curr_step}，当前回合 {agent.current_episode}"
         )
 
-    def save_best(self, agent: Mario, eval_reward: float, episode: int | None = None) -> None:
+    def save_best(self, agent: Mario, eval_score: float, eval_reward: float, eval_max_x_pos: float, eval_flag_rate: float, episode: int | None = None) -> None:
         if episode is not None:
             agent.current_episode = episode
 
         checkpoint = agent.state_dict()
+        checkpoint["best_eval_score"] = float(eval_score)
         checkpoint["best_eval_reward"] = float(eval_reward)
+        checkpoint["best_eval_max_x_pos"] = float(eval_max_x_pos)
+        checkpoint["best_eval_flag_rate"] = float(eval_flag_rate)
         for checkpoint_path in self.artifacts.best_checkpoint_paths:
             checkpoint_path.parent.mkdir(parents=True, exist_ok=True)
             torch.save(checkpoint, checkpoint_path)
 
         tqdm.write(
             f"最佳 MarioNet 已保存到 {self.artifacts.best_checkpoint}，"
-            f"评估奖励 {eval_reward:.3f}，当前步数 {agent.curr_step}，当前回合 {agent.current_episode}"
+            f"评估分数={eval_score:.3f}，平均奖励={eval_reward:.3f}，"
+            f"平均最大 x={eval_max_x_pos:.3f}，通关率={eval_flag_rate:.3f}，"
+            f"当前步数 {agent.curr_step}，当前回合 {agent.current_episode}"
         )

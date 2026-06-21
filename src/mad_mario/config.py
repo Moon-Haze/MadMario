@@ -21,6 +21,8 @@ class EnvConfig:
     stuck_penalty_enabled: bool = True
     stuck_max_steps: int = 120
     stuck_penalty: float = 5.0
+    progress_reward_enabled: bool = True
+    progress_reward_scale: float = 0.01
     normalize_observation: bool = False
 
 
@@ -29,11 +31,14 @@ class AgentConfig:
     replay_capacity: int = 100000
     gamma: float = 0.99
     learning_rate: float = 0.0000625
+    lr_warmup_steps: int = 10000
+    lr_min_ratio: float = 0.1
     exploration_rate: float = 1.0
     exploration_decay_steps: int = int(2e6)
     exploration_rate_min: float = 0.02
     gradient_clip_norm: float = 10.0
     n_step: int = 3
+    noisy_std_init: float = 0.5
     per_alpha: float = 0.6
     per_beta_start: float = 0.4
     per_beta_frames: int = int(2e6)
@@ -137,11 +142,15 @@ def add_train_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--burnin", type=int, default=TrainingConfig.burnin, help="开始训练前收集的经验数量")
     parser.add_argument("--replay-capacity", type=int, default=AgentConfig.replay_capacity, help="经验回放容量")
     parser.add_argument("--learning-rate", type=float, default=AgentConfig.learning_rate, help="学习率")
+    parser.add_argument("--lr-warmup-steps", type=int, default=AgentConfig.lr_warmup_steps, help="学习率 warmup 步数")
+    parser.add_argument("--lr-min-ratio", type=float, default=AgentConfig.lr_min_ratio, help="最小学习率相对初始学习率的比例")
     parser.add_argument("--gamma", type=float, default=AgentConfig.gamma, help="折扣因子")
     parser.add_argument("--exploration-decay-steps", type=int, default=AgentConfig.exploration_decay_steps, help="epsilon 线性衰减步数")
     parser.add_argument("--exploration-min", type=float, default=AgentConfig.exploration_rate_min, help="最小探索率")
     parser.add_argument("--gradient-clip-norm", type=float, default=AgentConfig.gradient_clip_norm, help="梯度裁剪范数")
     parser.add_argument("--n-step", type=int, default=AgentConfig.n_step, help="N-step return 步数")
+    parser.add_argument("--noisy-std-init", type=float, default=AgentConfig.noisy_std_init, help="NoisyNet 噪声标准差初始值（设为 0 使用普通 DuelingDQN + epsilon）")
+    parser.add_argument("--no-noisy", action="store_true", help="关闭 NoisyNet，回退到 DuelingDQN + epsilon-greedy")
     parser.add_argument("--per-alpha", type=float, default=AgentConfig.per_alpha, help="PER 优先级指数")
     parser.add_argument("--per-beta-start", type=float, default=AgentConfig.per_beta_start, help="PER beta 初始值")
     parser.add_argument("--per-beta-frames", type=int, default=AgentConfig.per_beta_frames, help="PER beta 退火步数")
@@ -151,6 +160,8 @@ def add_train_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--no-stuck-penalty", action="store_true", help="关闭卡住惩罚与提前截断")
     parser.add_argument("--stuck-max-steps", type=int, default=EnvConfig.stuck_max_steps, help="连续多少步无位移后判定卡住")
     parser.add_argument("--stuck-penalty", type=float, default=EnvConfig.stuck_penalty, help="卡住时额外扣除的奖励")
+    parser.add_argument("--no-progress-reward", action="store_true", help="关闭向右移动奖励")
+    parser.add_argument("--progress-reward-scale", type=float, default=EnvConfig.progress_reward_scale, help="每向右移动一像素的额外奖励系数")
     parser.add_argument("--normalize-observation", action="store_true", help="在环境层归一化观测（默认保持 uint8）")
 
 
@@ -176,6 +187,8 @@ def config_from_train_args(args) -> AppConfig:
         stuck_penalty_enabled=not args.no_stuck_penalty,
         stuck_max_steps=max(1, args.stuck_max_steps),
         stuck_penalty=args.stuck_penalty,
+        progress_reward_enabled=not args.no_progress_reward,
+        progress_reward_scale=args.progress_reward_scale,
         normalize_observation=args.normalize_observation,
     )
     save_root = args.save_root if args.flat_save_root else compatible_save_root(args.save_root, env_config)
@@ -186,10 +199,13 @@ def config_from_train_args(args) -> AppConfig:
             replay_capacity=args.replay_capacity,
             gamma=args.gamma,
             learning_rate=args.learning_rate,
+            lr_warmup_steps=max(1, args.lr_warmup_steps),
+            lr_min_ratio=min(1.0, max(0.0, args.lr_min_ratio)),
             exploration_decay_steps=args.exploration_decay_steps,
             exploration_rate_min=args.exploration_min,
             gradient_clip_norm=args.gradient_clip_norm,
             n_step=max(1, args.n_step),
+            noisy_std_init=0.0 if args.no_noisy else max(0.0, args.noisy_std_init),
             per_alpha=args.per_alpha,
             per_beta_start=args.per_beta_start,
             per_beta_frames=max(1, args.per_beta_frames),
@@ -217,7 +233,13 @@ def config_from_train_args(args) -> AppConfig:
 
 
 def config_from_play_args(args) -> AppConfig:
-    env_config = EnvConfig(render_mode=args.render_mode, movement=args.movement)
+    env_config = EnvConfig(
+        render_mode=args.render_mode,
+        movement=args.movement,
+        clip_rewards=False,
+        stuck_penalty_enabled=False,
+        progress_reward_enabled=False,
+    )
     save_root = args.save_root if args.flat_save_root else compatible_save_root(args.save_root, env_config)
 
     checkpoint = args.checkpoint or save_root / "latest.chkpt"

@@ -1,3 +1,4 @@
+import math
 from collections import defaultdict, deque
 
 import numpy as np
@@ -20,6 +21,8 @@ class Mario:
             epsilon=agent_config.per_epsilon,
         )
 
+        self._noisy = agent_config.noisy_std_init > 0
+        self._noisy_std_init = float(agent_config.noisy_std_init)
         self.exploration_rate_start = agent_config.exploration_rate
         self.exploration_rate = agent_config.exploration_rate
         self.exploration_decay_steps = agent_config.exploration_decay_steps
@@ -29,6 +32,10 @@ class Mario:
         self.n_step = max(1, int(agent_config.n_step))
         self.per_beta_start = agent_config.per_beta_start
         self.per_beta_frames = agent_config.per_beta_frames
+
+        self._lr_warmup_steps = int(agent_config.lr_warmup_steps)
+        self._lr_min_ratio = float(agent_config.lr_min_ratio)
+        self._lr_cosine_steps = max(self._lr_warmup_steps + 1, int(agent_config.exploration_decay_steps))
 
         self.curr_step = 0
         self.current_episode = 0
@@ -43,8 +50,12 @@ class Mario:
         self.use_cuda = torch.cuda.is_available()
         self.device = torch.device("cuda" if self.use_cuda else "cpu")
 
-        self.net = MarioNet(self.state_dim, self.action_dim).float().to(self.device)
+        self.net = MarioNet(self.state_dim, self.action_dim, noisy_std_init=agent_config.noisy_std_init).float().to(self.device)
         self.optimizer = torch.optim.Adam(self.net.parameters(), lr=agent_config.learning_rate)
+        self.scheduler = torch.optim.lr_scheduler.LambdaLR(
+            self.optimizer,
+            lr_lambda=self._lr_lambda,
+        )
         self.loss_fn = torch.nn.SmoothL1Loss(reduction="none")
 
     def act(self, state):
@@ -52,22 +63,34 @@ class Mario:
         return self.act_batch(np.expand_dims(state, axis=0))[0]
 
     def act_batch(self, states):
-        """给定一批状态，为每个环境选择一个 epsilon-greedy 动作。"""
+        """给定一批状态，为每个环境选择一个动作。
+
+        使用 NoisyNet 时直接 argmax（网络内噪声提供探索）；
+        否则使用 epsilon-greedy。
+        """
         states = np.asarray(states)
         batch_size = len(states)
-        actions = np.empty(batch_size, dtype=np.int64)
-        explore_mask = np.random.rand(batch_size) < self.exploration_rate
+        states_tensor = self._state_tensor(states)
 
-        actions[explore_mask] = np.random.randint(self.action_dim, size=explore_mask.sum())
-        exploit_indices = np.flatnonzero(~explore_mask)
-        if len(exploit_indices) > 0:
-            exploit_states = self._state_tensor(states[exploit_indices])
+        if self._noisy:
+            self.net.online.train()
             with torch.no_grad():
-                action_values = self.net(exploit_states, model="online")
-            actions[exploit_indices] = torch.argmax(action_values, axis=1).cpu().numpy()
+                action_values = self.net(states_tensor, model="online")
+            actions = torch.argmax(action_values, axis=1).cpu().numpy()
+        else:
+            actions = np.empty(batch_size, dtype=np.int64)
+            explore_mask = np.random.rand(batch_size) < self.exploration_rate
+            actions[explore_mask] = np.random.randint(self.action_dim, size=explore_mask.sum())
+            exploit_indices = np.flatnonzero(~explore_mask)
+            if len(exploit_indices) > 0:
+                exploit_states = states_tensor[exploit_indices]
+                with torch.no_grad():
+                    action_values = self.net(exploit_states, model="online")
+                actions[exploit_indices] = torch.argmax(action_values, axis=1).cpu().numpy()
 
         self.curr_step += batch_size
-        self._update_exploration_rate()
+        if not self._noisy:
+            self._update_exploration_rate()
         return actions.tolist()
 
     def act_eval(self, state):
@@ -75,6 +98,7 @@ class Mario:
 
     def act_eval_batch(self, states):
         states = self._state_tensor(np.asarray(states))
+        self.net.online.eval()
         with torch.no_grad():
             action_values = self.net(states, model="online")
         return torch.argmax(action_values, axis=1).cpu().numpy().tolist()
@@ -95,6 +119,14 @@ class Mario:
             self.exploration_rate_min - self.exploration_rate_start
         )
         self.exploration_rate = max(self.exploration_rate_min, self.exploration_rate)
+
+    def _lr_lambda(self, step):
+        if step < self._lr_warmup_steps:
+            return max(self._lr_min_ratio, float(step) / self._lr_warmup_steps)
+        if step >= self._lr_cosine_steps:
+            return self._lr_min_ratio
+        progress = (step - self._lr_warmup_steps) / (self._lr_cosine_steps - self._lr_warmup_steps)
+        return self._lr_min_ratio + 0.5 * (1.0 - self._lr_min_ratio) * (1.0 + math.cos(math.pi * progress))
 
     def cache(self, state, next_state, action, reward, done):
         self._cache_transition(0, state, next_state, action, reward, done)
@@ -167,6 +199,7 @@ class Mario:
         loss.backward()
         torch.nn.utils.clip_grad_norm_(self.net.online.parameters(), self.gradient_clip_norm)
         self.optimizer.step()
+        self.scheduler.step()
         return loss.item(), td_errors.detach()
 
     def sync_Q_target(self):
@@ -203,21 +236,57 @@ class Mario:
         return {
             "model": self.net.state_dict(),
             "optimizer": self.optimizer.state_dict(),
+            "scheduler": self.scheduler.state_dict(),
             "exploration_rate": self.exploration_rate,
             "curr_step": self.curr_step,
             "episode": self.current_episode,
         }
 
+    def _convert_old_state_dict(self, state_dict, noisy_std_init):
+        """从 DuelingDQN (nn.Linear) 格式转换到 NoisyDuelingDQN (NoisyLinear) 格式。
+
+        只转换 value/advantage 分支中的线性层；卷积层（features）保持不动。
+        """
+        has_old_format = any("value" in k or "advantage" in k for k in state_dict
+                             if k.endswith(".weight") and not k.endswith("weight_mu"))
+        if not has_old_format:
+            return state_dict
+
+        new_sd = {}
+        for key, param in state_dict.items():
+            is_value_or_adv = "value" in key or "advantage" in key
+
+            if is_value_or_adv and key.endswith(".weight"):
+                base = key.rsplit(".", 1)[0]
+                new_sd[base + ".weight_mu"] = param
+                new_sd[base + ".weight_sigma"] = torch.full_like(
+                    param, noisy_std_init / math.sqrt(param.shape[1])
+                )
+            elif is_value_or_adv and key.endswith(".bias"):
+                base = key.rsplit(".", 1)[0]
+                new_sd[base + ".bias_mu"] = param
+                new_sd[base + ".bias_sigma"] = torch.full_like(
+                    param, noisy_std_init / math.sqrt(param.shape[0])
+                )
+            else:
+                new_sd[key] = param
+        return new_sd
+
     def load_state_dict(self, checkpoint):
         exploration_rate = checkpoint.get("exploration_rate", self.exploration_rate)
         state_dict = checkpoint.get("model")
         optimizer_state = checkpoint.get("optimizer")
+        scheduler_state = checkpoint.get("scheduler")
         curr_step = checkpoint.get("curr_step", 0)
         episode = checkpoint.get("episode", 0)
 
+        if self._noisy:
+            state_dict = self._convert_old_state_dict(state_dict, self._noisy_std_init)
         self.net.load_state_dict(state_dict)
         if optimizer_state is not None:
             self.optimizer.load_state_dict(optimizer_state)
+        if scheduler_state is not None:
+            self.scheduler.load_state_dict(scheduler_state)
         self.exploration_rate = exploration_rate
         self.curr_step = curr_step
         self.current_episode = episode

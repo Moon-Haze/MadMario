@@ -113,6 +113,28 @@ class StuckPenalty(gym.Wrapper):
         return float(value)
 
 
+class ProgressReward(gym.Wrapper):
+    def __init__(self, env, scale=0.01):
+        super().__init__(env)
+        self.scale = float(scale)
+        self.last_x_pos = None
+
+    def reset(self, **kwargs):
+        obs, info = self.env.reset(**kwargs)
+        self.last_x_pos = info.get("x_pos")
+        return obs, info
+
+    def step(self, action):
+        obs, reward, terminated, truncated, info = self.env.step(action)
+        x_pos = info.get("x_pos")
+        if x_pos is not None and self.last_x_pos is not None:
+            delta = float(x_pos) - self.last_x_pos
+            reward = float(reward) + self.scale * max(0.0, delta)
+        if x_pos is not None:
+            self.last_x_pos = float(x_pos)
+        return obs, reward, terminated, truncated, info
+
+
 class NormalizeObservation(gym.ObservationWrapper):
     """将观测从 uint8 [0, 255] 归一化为 float32 [0, 1]。"""
 
