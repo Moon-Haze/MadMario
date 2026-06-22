@@ -2,14 +2,17 @@ from __future__ import annotations
 
 import argparse
 import os
-import re
 from dataclasses import dataclass
 from pathlib import Path
 
 
 @dataclass
 class EnvConfig:
-    env_name: str = "SuperMarioBros-1-1-v0"
+    game: str = "SuperMarioBros"
+    world: int = 1
+    level: int = 1
+    version: int = 0
+    levels: list[str] | None = None
     state_dim: tuple[int, int, int] = (4, 84, 84)
     frame_skip: int = 4
     frame_stack: int = 4
@@ -77,22 +80,24 @@ class AppConfig:
     training: TrainingConfig
 
 
-def _slug(value) -> str:
-    slug = re.sub(r"[^A-Za-z0-9_.-]+", "-", str(value)).strip("-")
-    return slug or "default"
+def build_env_name(game: str, world: int, level: int, version: int = 0) -> str:
+    """构建完整的 Gym 环境 ID。"""
+    return f"{game}-{world}-{level}-v{version}"
+
+
+def _expand_level(level_id: str, game: str = "SuperMarioBros", version: int = 0) -> str:
+    """将简写关卡名转为完整 env ID，如 1-1 → SuperMarioBros-1-1-v0。"""
+    level_id = level_id.strip()
+    if "-v" in level_id:
+        return level_id
+    return build_env_name(game, *map(int, level_id.split("-")), version)
 
 
 def compatible_save_root(save_root: Path, config: EnvConfig) -> Path:
-    state_dim = "x".join(str(dim) for dim in config.state_dim)
-    folder = "_".join(
-        (
-            f"env-{_slug(config.env_name)}",
-            f"movement-{_slug(config.movement)}",
-            f"state-{state_dim}",
-            f"stack-{config.frame_stack}",
-            f"resize-{config.resize_shape}",
-        )
-    )
+    if config.levels and len(config.levels) > 1:
+        folder = f"multi-v{config.version}_{config.movement}"
+    else:
+        folder = f"{config.world}-{config.level}-v{config.version}_{config.movement}"
     return save_root / folder
 
 
@@ -120,6 +125,16 @@ def build_parser() -> argparse.ArgumentParser:
 
 def add_train_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--episodes", type=int, default=TrainingConfig.episodes, help="训练回合数")
+    parser.add_argument("--game", type=str, default=EnvConfig.game, help="游戏名称")
+    parser.add_argument("--world", type=int, default=EnvConfig.world, help="世界/大关")
+    parser.add_argument("--level", type=int, default=EnvConfig.level, help="关卡")
+    parser.add_argument("--version", type=int, default=EnvConfig.version, help="环境版本")
+    parser.add_argument(
+        "--levels",
+        type=str,
+        default=None,
+        help="多关卡训练，逗号分隔如 1-1,1-2,1-3",
+    )
     parser.add_argument(
         "--movement",
         choices=("right_only", "simple", "complex"),
@@ -168,6 +183,10 @@ def add_train_args(parser: argparse.ArgumentParser) -> None:
 def add_play_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--checkpoint", type=Path, default=None, help="要播放的 checkpoint")
     parser.add_argument("--episodes", type=int, default=1, help="播放回合数")
+    parser.add_argument("--game", type=str, default=EnvConfig.game, help="游戏名称")
+    parser.add_argument("--world", type=int, default=EnvConfig.world, help="世界/大关")
+    parser.add_argument("--level", type=int, default=EnvConfig.level, help="关卡")
+    parser.add_argument("--version", type=int, default=EnvConfig.version, help="环境版本")
     parser.add_argument(
         "--movement",
         choices=("right_only", "simple", "complex"),
@@ -180,8 +199,19 @@ def add_play_args(parser: argparse.ArgumentParser) -> None:
 
 
 def config_from_train_args(args) -> AppConfig:
+    levels = None
+    if args.levels:
+        levels = [
+            _expand_level(level, game=args.game, version=args.version)
+            for level in args.levels.split(",") if level.strip()
+        ]
     env_config = EnvConfig(
+        game=args.game,
+        world=args.world,
+        level=args.level,
+        version=args.version,
         movement=args.movement,
+        levels=levels,
         clip_rewards=not args.no_reward_clip,
         reward_clip_value=args.reward_clip_value,
         stuck_penalty_enabled=not args.no_stuck_penalty,
@@ -234,6 +264,10 @@ def config_from_train_args(args) -> AppConfig:
 
 def config_from_play_args(args) -> AppConfig:
     env_config = EnvConfig(
+        game=args.game,
+        world=args.world,
+        level=args.level,
+        version=args.version,
         render_mode=args.render_mode,
         movement=args.movement,
         clip_rewards=False,

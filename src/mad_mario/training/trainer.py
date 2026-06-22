@@ -1,3 +1,5 @@
+import random
+
 from mad_mario.agent.checkpoint import CheckpointManager
 from mad_mario.agent.mario import Mario
 from mad_mario.config import AppConfig
@@ -26,7 +28,16 @@ def train(config: AppConfig):
         train_single(config, artifacts)
 
 
+def _active_levels(config):
+    """返回实际使用的关卡列表，单关卡时返回 None（保持兼容）。"""
+    levels = config.env.levels
+    if levels and len(levels) > 1:
+        return levels
+    return None
+
+
 def train_single(config: AppConfig, artifacts):
+    active_levels = _active_levels(config)
     env = make_mario_env(config.env)
     agent = build_agent(config, env.action_space.n)
     checkpoint_manager = CheckpointManager(config.artifacts, artifacts)
@@ -36,7 +47,7 @@ def train_single(config: AppConfig, artifacts):
         artifacts.plot_path_groups,
         reset=loaded_checkpoint is None,
     )
-    train_single_env_loop(env, agent, logger, checkpoint_manager, config)
+    train_single_env_loop(env, agent, logger, checkpoint_manager, config, active_levels)
 
 
 def train_vector(config: AppConfig, artifacts):

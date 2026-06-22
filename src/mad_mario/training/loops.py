@@ -1,8 +1,10 @@
+import random
 import warnings
 
 import numpy as np
 from tqdm import tqdm
 
+from mad_mario.env.factory import make_mario_env
 from mad_mario.training.evaluation import evaluate_agent
 from mad_mario.training.progress import TrainingProgress, recent_metric_buffers, rolling_mean
 
@@ -54,7 +56,7 @@ def should_save_step(agent, next_save_step):
     return agent.curr_step >= next_save_step
 
 
-def train_single_env_loop(env, agent, logger, checkpoint_manager, config):
+def train_single_env_loop(env, agent, logger, checkpoint_manager, config, levels=None):
     completed_episodes = agent.loaded_episode
     next_save_step = _next_interval_step(agent.curr_step, config.artifacts.save_every)
     progress = TrainingProgress(config.training.episodes, initial=completed_episodes, desc="训练进度")
@@ -63,6 +65,10 @@ def train_single_env_loop(env, agent, logger, checkpoint_manager, config):
 
     try:
         while completed_episodes < config.training.episodes:
+            if levels:
+                level_name = random.choice(levels)
+                env.close()
+                env = make_mario_env(config.env, level_name=level_name)
             state, _ = env.reset()
             ep_reward = 0.0
             ep_length = 0
