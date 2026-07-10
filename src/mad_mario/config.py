@@ -13,6 +13,7 @@ class EnvConfig:
     level: int = 1
     version: int = 0
     levels: list[str] | None = None
+    worlds: list[int] | None = None
     state_dim: tuple[int, int, int] = (4, 84, 84)
     frame_skip: int = 4
     frame_stack: int = 4
@@ -94,11 +95,35 @@ def _expand_level(level_id: str, game: str = "SuperMarioBros", version: int = 0)
 
 
 def compatible_save_root(save_root: Path, config: EnvConfig) -> Path:
-    if config.levels and len(config.levels) > 1:
+    if config.worlds and len(config.worlds) > 1:
+        worlds_str = "-".join(str(w) for w in config.worlds)
+        if config.levels:
+            levels_str = _extract_level_numbers(config.levels, config.worlds)
+        else:
+            levels_str = str(config.level)
+        folder = f"worlds-{worlds_str}_levels-{levels_str}-v{config.version}_{config.movement}"
+    elif config.levels and len(config.levels) > 1:
         folder = f"multi-v{config.version}_{config.movement}"
     else:
         folder = f"{config.world}-{config.level}-v{config.version}_{config.movement}"
     return save_root / folder
+
+
+def _extract_level_numbers(levels: list[str], worlds: list[int]) -> str:
+    """从完整 env ID 列表中提取关卡号，去重后拼成短字符串。"""
+    seen = set()
+    numbers = []
+    for env_id in levels:
+        parts = env_id.split("-")
+        if len(parts) >= 2:
+            try:
+                level_num = int(parts[-2])
+            except ValueError:
+                continue
+            if level_num not in seen:
+                seen.add(level_num)
+                numbers.append(str(level_num))
+    return "-".join(numbers) if numbers else "all"
 
 
 def resolve_checkpoint(config: ArtifactConfig) -> Path | None:
@@ -134,6 +159,12 @@ def add_train_args(parser: argparse.ArgumentParser) -> None:
         type=str,
         default=None,
         help="多关卡训练，逗号分隔如 1-1,1-2,1-3",
+    )
+    parser.add_argument(
+        "--worlds",
+        type=str,
+        default=None,
+        help="多世界训练，逗号分隔如 1,3；与 --levels/--level 组合生成 (world × level) 关卡列表",
     )
     parser.add_argument(
         "--movement",
@@ -198,9 +229,36 @@ def add_play_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--flat-save-root", action="store_true", help="直接使用输出根目录，不按兼容参数分子目录")
 
 
+def _get_level_ids_for_worlds(args) -> list[str]:
+    """根据 --worlds 和 --levels/--level 参数生成关卡 ID 列表（笛卡尔积）。"""
+    worlds = [int(w.strip()) for w in args.worlds.split(",") if w.strip()]
+
+    if args.levels:
+        raw_levels = [l.strip() for l in args.levels.split(",") if l.strip()]
+    else:
+        raw_levels = [str(args.level)]
+
+    expanded = []
+    for w in worlds:
+        for rl in raw_levels:
+            if "-" in rl:
+                expanded.append(rl)
+            else:
+                expanded.append(f"{w}-{rl}")
+    return expanded
+
+
 def config_from_train_args(args) -> AppConfig:
     levels = None
-    if args.levels:
+    worlds = None
+    if args.worlds:
+        worlds = [int(w.strip()) for w in args.worlds.split(",") if w.strip()]
+        raw_levels = _get_level_ids_for_worlds(args)
+        levels = [
+            _expand_level(lv, game=args.game, version=args.version)
+            for lv in raw_levels
+        ]
+    elif args.levels:
         levels = [
             _expand_level(level, game=args.game, version=args.version)
             for level in args.levels.split(",") if level.strip()
@@ -212,6 +270,7 @@ def config_from_train_args(args) -> AppConfig:
         version=args.version,
         movement=args.movement,
         levels=levels,
+        worlds=worlds,
         clip_rewards=not args.no_reward_clip,
         reward_clip_value=args.reward_clip_value,
         stuck_penalty_enabled=not args.no_stuck_penalty,

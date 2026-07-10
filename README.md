@@ -37,7 +37,93 @@ Choose one of the following options based on your hardware:
 source .venv/bin/activate
 ```
 
-## Running
+## CLI Reference
+
+The CLI provides two subcommands: `train` and `play`.
+
+### Usage
+
+```bash
+# If installed as package
+mad-mario train [options]
+mad-mario play [options]
+
+# Or via module
+python -m mad_mario.cli train [options]
+python -m mad_mario.cli play [options]
+```
+
+### `train` Options
+
+| Argument | Default | Description |
+| -------- | ------- | ----------- |
+| **Game & Level** | | |
+| `--game` | `SuperMarioBros` | Gym environment game name |
+| `--world` | `1` | World / level pack number |
+| `--level` | `1` | Level number |
+| `--version` | `0` | Environment version suffix |
+| `--levels` | — | Multi-level training, comma-separated (e.g. `1-1,1-2,1-3`) |
+| `--worlds` | — | Multi-world training, comma-separated (e.g. `1,3`); combines with `--levels`/`--level` to generate world × level grids |
+| `--movement` | `right_only` | Action space preset — choices: `right_only`, `simple`, `complex` |
+| **Environment** | | |
+| `--vector` | *(flag)* | Enable vectorized (parallel) environments |
+| `--num-envs` | `cpus // 2` | Number of parallel environments |
+| `--no-reward-clip` | *(flag)* | Disable reward clipping |
+| `--reward-clip-value` | `1.0` | Reward clipping absolute value |
+| `--no-stuck-penalty` | *(flag)* | Disable stuck penalty and early truncation |
+| `--stuck-max-steps` | `120` | Consecutive steps without movement before considered stuck |
+| `--stuck-penalty` | `5.0` | Extra reward deduction when stuck |
+| `--no-progress-reward` | *(flag)* | Disable right-movement reward |
+| `--progress-reward-scale` | `0.01` | Reward coefficient per pixel moved right |
+| `--normalize-observation` | *(flag)* | Normalize observations (default keeps uint8) |
+| **Training Loop** | | |
+| `--episodes` | `20000` | Total training episodes |
+| `--batch-size` | `32` | Batch size per learning step |
+| `--burnin` | `50000` | Experiences to collect before training starts |
+| `--learning-rate` | `0.0000625` | Initial learning rate |
+| `--lr-warmup-steps` | `10000` | Learning rate warmup steps |
+| `--lr-min-ratio` | `0.1` | Minimum LR as ratio of initial LR |
+| `--gamma` | `0.99` | Discount factor (γ) |
+| `--exploration-decay-steps` | `2000000` | ε-greedy epsilon linear decay steps |
+| `--exploration-min` | `0.02` | Minimum exploration rate |
+| `--gradient-clip-norm` | `10.0` | Gradient clipping max norm |
+| `--n-step` | `3` | N-step return (number of bootstrap steps) |
+| **Network & Algorithm** | | |
+| `--replay-capacity` | `100000` | Experience replay buffer capacity |
+| `--noisy-std-init` | `0.5` | NoisyNet noise standard deviation initial value (set to `0` for plain DuelingDQN + ε-greedy) |
+| `--no-noisy` | *(flag)* | Disable NoisyNet, fall back to DuelingDQN + ε-greedy |
+| `--per-alpha` | `0.6` | Prioritized Experience Replay (PER) priority exponent |
+| `--per-beta-start` | `0.4` | PER importance-sampling β initial value |
+| `--per-beta-frames` | `2000000` | PER β annealing frames |
+| `--per-epsilon` | `1e-6` | PER priority epsilon |
+| **Checkpoint & Logging** | | |
+| `--save-root` | `checkpoints` | Checkpoint root directory |
+| `--flat-save-root` | *(flag)* | Use save-root directly without version/movement subdirectory |
+| `--checkpoint` | — | Path to a specific checkpoint to resume from |
+| `--no-resume` | *(flag)* | Ignore latest checkpoint, start training from scratch |
+| `--keep-runs` | *(flag)* | Keep a timestamped per-run copy of artifacts |
+| `--run-name` | — | Custom run directory name (used with `--keep-runs`) |
+| `--record-every` | `20` | Log metrics, refresh charts, and save every N episodes |
+| `--eval-every` | `50` | Run greedy evaluation every N episodes |
+| `--eval-episodes` | `3` | Number of episodes per evaluation |
+| `--save-every` | `500000` | Save checkpoint every N environment steps |
+
+### `play` Options
+
+| Argument | Default | Description |
+| -------- | ------- | ----------- |
+| `--checkpoint` | `checkpoints/<compat>/latest.chkpt` | Checkpoint to load and play |
+| `--episodes` | `1` | Number of episodes to play |
+| `--game` | `SuperMarioBros` | Gym environment game name |
+| `--world` | `1` | World / level pack number |
+| `--level` | `1` | Level number |
+| `--version` | `0` | Environment version suffix |
+| `--movement` | `right_only` | Action space preset — choices: `right_only`, `simple`, `complex` |
+| `--render-mode` | `rgb_array` | Environment render mode (uses matplotlib display) |
+| `--save-root` | `checkpoints` | Output root directory |
+| `--flat-save-root` | *(flag)* | Use save-root directly without subdirectory |
+
+### Running
 
 ### Train Mario
 
@@ -62,6 +148,19 @@ python -m mad_mario.cli train \
   --num-envs 8 \
   --record-every 20 \
   --save-every 500000
+```
+
+Multi-world training (generates world × level grid):
+
+```bash
+# Worlds 1 and 3, level 1 in each (default)
+python -m mad_mario.cli train --worlds 1,3
+
+# Worlds 1 and 2, levels 1 and 2 → 1-1, 1-2, 2-1, 2-2
+python -m mad_mario.cli train --worlds 1,2 --levels 1,2
+
+# Worlds 1,2,3 and explicit level IDs
+python -m mad_mario.cli train --worlds 1,2,3 --levels 1,2
 ```
 
 By default, training resumes from `checkpoints/latest.chkpt` if it exists. To start from scratch:
