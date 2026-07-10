@@ -63,7 +63,7 @@ python -m mad_mario.cli play [options]
 | `--level` | `1` | Level number |
 | `--version` | `0` | Environment version suffix |
 | `--levels` | — | Multi-level training, comma-separated (e.g. `1-1,1-2,1-3`) |
-| `--worlds` | — | Multi-world training, comma-separated (e.g. `1,3`); combines with `--levels`/`--level` to generate world × level grids |
+| `--worlds` | — | Multi-world training, supports ranges (e.g. `1-3,5,7-8`); each world automatically uses all levels 1–4 |
 | `--movement` | `right_only` | Action space preset — choices: `right_only`, `simple`, `complex` |
 | **Environment** | | |
 | `--vector` | *(flag)* | Enable vectorized (parallel) environments |
@@ -150,17 +150,17 @@ python -m mad_mario.cli train \
   --save-every 500000
 ```
 
-Multi-world training (generates world × level grid):
+Multi-world training (each world automatically uses all levels 1–4):
 
 ```bash
-# Worlds 1 and 3, level 1 in each (default)
+# Worlds 1 and 3 → 1-1..1-4, 3-1..3-4（共 8 关）
 python -m mad_mario.cli train --worlds 1,3
 
-# Worlds 1 and 2, levels 1 and 2 → 1-1, 1-2, 2-1, 2-2
-python -m mad_mario.cli train --worlds 1,2 --levels 1,2
+# Range: worlds 1 through 4 → 共 16 关
+python -m mad_mario.cli train --worlds 1-4
 
-# Worlds 1,2,3 and explicit level IDs
-python -m mad_mario.cli train --worlds 1,2,3 --levels 1,2
+# Mixed: worlds 1-3, 5, and 7-8 → 共 24 关
+python -m mad_mario.cli train --worlds 1-3,5,7-8
 ```
 
 By default, training resumes from `checkpoints/latest.chkpt` if it exists. To start from scratch:

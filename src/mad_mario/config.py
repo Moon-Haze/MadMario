@@ -81,6 +81,130 @@ class AppConfig:
     training: TrainingConfig
 
 
+MAX_WORLD = 8
+
+
+def _parse_world_token(token: str) -> list[int]:
+    """解析单个 world token：``3`` → ``[3]``，``1-3`` → ``[1, 2, 3]``。"""
+    token = token.strip()
+    if "-" in token:
+        parts = token.split("-", maxsplit=1)
+        if len(parts) != 2 or not parts[0] or not parts[1]:
+            raise argparse.ArgumentTypeError(
+                f"世界范围格式错误: {token!r}，应使用 1-3 格式"
+            )
+        try:
+            start, end = int(parts[0]), int(parts[1])
+        except ValueError as exc:
+            raise argparse.ArgumentTypeError(
+                f"世界范围必须为数字: {token!r}"
+            ) from exc
+        if start > end:
+            raise argparse.ArgumentTypeError(
+                f"世界范围起始值 {start} 大于结束值 {end}"
+            )
+        if not (1 <= start <= MAX_WORLD) or not (1 <= end <= MAX_WORLD):
+            raise argparse.ArgumentTypeError(
+                f"世界号超出范围，Super Mario 的世界号为 1～{MAX_WORLD}，得到: {token!r}"
+            )
+        return list(range(start, end + 1))
+    else:
+        try:
+            w = int(token)
+        except ValueError as exc:
+            raise argparse.ArgumentTypeError(
+                f"世界号格式错误: {token!r}，应为数字或范围如 1-3"
+            ) from exc
+        if not (1 <= w <= MAX_WORLD):
+            raise argparse.ArgumentTypeError(
+                f"世界号 {w} 超出范围，Super Mario 的世界号为 1～{MAX_WORLD}"
+            )
+        return [w]
+
+
+def _worlds_type(value: str) -> list[int]:
+    """argparse type: 解析并校验世界号列表，支持逗号和范围。
+
+    支持格式:
+    - ``1,3,5`` — 逗号分隔
+    - ``1-4`` — 范围（含两端）
+    - ``1-3,5,7-8`` — 混合
+    """
+    try:
+        tokens = [t.strip() for t in value.split(",") if t.strip()]
+    except Exception as exc:
+        raise argparse.ArgumentTypeError("worlds 参数格式错误") from exc
+    if not tokens:
+        raise argparse.ArgumentTypeError("worlds 参数不能为空")
+
+    worlds = []
+    for token in tokens:
+        worlds.extend(_parse_world_token(token))
+
+    if not worlds:
+        raise argparse.ArgumentTypeError("worlds 参数不能为空")
+
+    # 去重并保持顺序
+    seen = set()
+    unique = []
+    for w in worlds:
+        if w not in seen:
+            seen.add(w)
+            unique.append(w)
+    return unique
+
+
+MAX_LEVEL = 4
+
+
+def _levels_type(value: str) -> list[str]:
+    """argparse type: 解析并校验关卡列表。
+
+    支持两种格式:
+    - 纯关卡号如 ``1,2``（与 ``--world`` / ``--worlds`` 组合使用）
+    - world-level 格式如 ``1-1,2-1``
+    """
+    try:
+        parts = [v.strip() for v in value.split(",") if v.strip()]
+    except Exception as exc:
+        raise argparse.ArgumentTypeError("levels 参数格式错误") from exc
+    if not parts:
+        raise argparse.ArgumentTypeError("levels 参数不能为空")
+    for p in parts:
+        if "-" in p:
+            tokens = p.split("-")
+            if len(tokens) != 2:
+                raise argparse.ArgumentTypeError(
+                    f"关卡格式错误: {p!r}，应使用 world-level 格式如 1-1"
+                )
+            try:
+                w, lv = int(tokens[0]), int(tokens[1])
+            except ValueError as exc:
+                raise argparse.ArgumentTypeError(
+                    f"关卡中的世界号和关卡号必须为数字: {p!r}"
+                ) from exc
+            if not (1 <= w <= MAX_WORLD):
+                raise argparse.ArgumentTypeError(
+                    f"关卡 {p!r} 中的世界号 {w} 超出范围，Super Mario 的世界号为 1～{MAX_WORLD}"
+                )
+            if not (1 <= lv <= MAX_LEVEL):
+                raise argparse.ArgumentTypeError(
+                    f"关卡 {p!r} 中的关卡号 {lv} 超出范围，每世界关卡号为 1～{MAX_LEVEL}"
+                )
+        else:
+            try:
+                lv = int(p)
+            except ValueError as exc:
+                raise argparse.ArgumentTypeError(
+                    f"关卡格式错误: {p!r}，应为数字或 world-level 格式如 1-1"
+                ) from exc
+            if not (1 <= lv <= MAX_LEVEL):
+                raise argparse.ArgumentTypeError(
+                    f"关卡号 {lv} 超出范围，每世界关卡号为 1～{MAX_LEVEL}"
+                )
+    return parts
+
+
 def build_env_name(game: str, world: int, level: int, version: int = 0) -> str:
     """构建完整的 Gym 环境 ID。"""
     return f"{game}-{world}-{level}-v{version}"
@@ -156,15 +280,15 @@ def add_train_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--version", type=int, default=EnvConfig.version, help="环境版本")
     parser.add_argument(
         "--levels",
-        type=str,
+        type=_levels_type,
         default=None,
-        help="多关卡训练，逗号分隔如 1-1,1-2,1-3",
+        help="多关卡训练，逗号分隔如 1-1,1-2,1-3（世界号 1～8，关卡号 1～4）",
     )
     parser.add_argument(
         "--worlds",
-        type=str,
+        type=_worlds_type,
         default=None,
-        help="多世界训练，逗号分隔如 1,3；与 --levels/--level 组合生成 (world × level) 关卡列表",
+        help="多世界训练，逗号分隔和范围如 1-3,5,7-8（世界号 1～8）；每个世界自动使用关卡 1～4",
     )
     parser.add_argument(
         "--movement",
@@ -229,22 +353,13 @@ def add_play_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--flat-save-root", action="store_true", help="直接使用输出根目录，不按兼容参数分子目录")
 
 
-def _get_level_ids_for_worlds(args) -> list[str]:
-    """根据 --worlds 和 --levels/--level 参数生成关卡 ID 列表（笛卡尔积）。"""
-    worlds = [int(w.strip()) for w in args.worlds.split(",") if w.strip()]
-
-    if args.levels:
-        raw_levels = [l.strip() for l in args.levels.split(",") if l.strip()]
-    else:
-        raw_levels = [str(args.level)]
-
+def _get_level_ids_for_worlds(worlds: list[int]) -> list[str]:
+    """根据世界号列表生成所有关卡 1-4 的 ID 列表（笛卡尔积）。"""
+    raw_levels = [str(lv) for lv in range(1, MAX_LEVEL + 1)]
     expanded = []
     for w in worlds:
         for rl in raw_levels:
-            if "-" in rl:
-                expanded.append(rl)
-            else:
-                expanded.append(f"{w}-{rl}")
+            expanded.append(f"{w}-{rl}")
     return expanded
 
 
@@ -252,8 +367,8 @@ def config_from_train_args(args) -> AppConfig:
     levels = None
     worlds = None
     if args.worlds:
-        worlds = [int(w.strip()) for w in args.worlds.split(",") if w.strip()]
-        raw_levels = _get_level_ids_for_worlds(args)
+        worlds = args.worlds
+        raw_levels = _get_level_ids_for_worlds(worlds)
         levels = [
             _expand_level(lv, game=args.game, version=args.version)
             for lv in raw_levels
@@ -261,7 +376,7 @@ def config_from_train_args(args) -> AppConfig:
     elif args.levels:
         levels = [
             _expand_level(level, game=args.game, version=args.version)
-            for level in args.levels.split(",") if level.strip()
+            for level in args.levels
         ]
     env_config = EnvConfig(
         game=args.game,
