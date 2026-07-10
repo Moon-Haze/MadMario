@@ -17,7 +17,7 @@ PLOT_CONFIGS = [
     ("平均 Q 值曲线", "回合", "平均 Q 值"),
 ]
 
-plt.rcParams["font.sans-serif"] = ["Microsoft YaHei", "SimHei", "Arial Unicode MS"]
+plt.rcParams["font.sans-serif"] = ["Source Han Sans SC", "Noto Sans CJK SC", "LXGW WenKai Mono", "DejaVu Sans"]
 plt.rcParams["axes.unicode_minus"] = False
 
 

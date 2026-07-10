@@ -23,6 +23,8 @@ def evaluate_agent(agent, config) -> EvalResult:
     flags = []
     max_x_positions = []
 
+    max_eval_steps = 10000  # 防止评估期间 CUDA 看门狗超时
+
     try:
         for _ in range(config.training.eval_episodes):
             state, _ = env.reset()
@@ -31,7 +33,7 @@ def evaluate_agent(agent, config) -> EvalResult:
             episode_max_x = 0.0
             flag_get = False
 
-            while True:
+            for _ in range(max_eval_steps):
                 action = agent.act_eval(state)
                 state, reward, terminated, truncated, info = env.step(action)
                 episode_reward += reward
