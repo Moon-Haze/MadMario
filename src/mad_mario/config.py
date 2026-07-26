@@ -27,6 +27,10 @@ class EnvConfig:
     stuck_penalty: float = 5.0
     progress_reward_enabled: bool = True
     progress_reward_scale: float = 0.01
+    score_reward_enabled: bool = True
+    score_reward_scale: float = 0.01
+    flag_reward_enabled: bool = True
+    flag_reward_value: float = 50.0
     normalize_observation: bool = False
 
 
@@ -332,6 +336,10 @@ def add_train_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--stuck-penalty", type=float, default=EnvConfig.stuck_penalty, help="卡住时额外扣除的奖励")
     parser.add_argument("--no-progress-reward", action="store_true", help="关闭向右移动奖励")
     parser.add_argument("--progress-reward-scale", type=float, default=EnvConfig.progress_reward_scale, help="每向右移动一像素的额外奖励系数")
+    parser.add_argument("--no-score-reward", action="store_true", help="关闭游戏得分变化奖励")
+    parser.add_argument("--score-reward-scale", type=float, default=EnvConfig.score_reward_scale, help="每增加 1 游戏得分的额外奖励系数")
+    parser.add_argument("--no-flag-reward", action="store_true", help="关闭旗杆通关奖励")
+    parser.add_argument("--flag-reward-value", type=float, default=EnvConfig.flag_reward_value, help="拉旗子的一次性奖励值")
     parser.add_argument("--normalize-observation", action="store_true", help="在环境层归一化观测（默认保持 uint8）")
 
 
@@ -393,6 +401,10 @@ def config_from_train_args(args) -> AppConfig:
         stuck_penalty=args.stuck_penalty,
         progress_reward_enabled=not args.no_progress_reward,
         progress_reward_scale=args.progress_reward_scale,
+        score_reward_enabled=not args.no_score_reward,
+        score_reward_scale=args.score_reward_scale,
+        flag_reward_enabled=not args.no_flag_reward,
+        flag_reward_value=args.flag_reward_value,
         normalize_observation=args.normalize_observation,
     )
     save_root = args.save_root if args.flat_save_root else compatible_save_root(args.save_root, env_config)
@@ -447,6 +459,8 @@ def config_from_play_args(args) -> AppConfig:
         clip_rewards=False,
         stuck_penalty_enabled=False,
         progress_reward_enabled=False,
+        score_reward_enabled=False,
+        flag_reward_enabled=False,
     )
     save_root = args.save_root if args.flat_save_root else compatible_save_root(args.save_root, env_config)
 

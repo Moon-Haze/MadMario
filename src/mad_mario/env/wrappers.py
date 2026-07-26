@@ -135,6 +135,53 @@ class ProgressReward(gym.Wrapper):
         return obs, reward, terminated, truncated, info
 
 
+class ScoreReward(gym.Wrapper):
+    """根据游戏得分（score）变化给予额外奖励。
+
+    追踪 ``info["score"]`` 的变化量，将得分增加转化为额外奖励。
+    放在 ``ClipReward`` 之后使用，保证得分变化不被裁剪。
+    """
+
+    def __init__(self, env, scale=0.01):
+        super().__init__(env)
+        self.scale = float(scale)
+        self.last_score = None
+
+    def reset(self, **kwargs):
+        obs, info = self.env.reset(**kwargs)
+        self.last_score = info.get("score")
+        return obs, info
+
+    def step(self, action):
+        obs, reward, terminated, truncated, info = self.env.step(action)
+        score = info.get("score")
+        if score is not None and self.last_score is not None:
+            delta = float(score) - self.last_score
+            if delta > 0:
+                reward = float(reward) + self.scale * delta
+        if score is not None:
+            self.last_score = float(score)
+        return obs, reward, terminated, truncated, info
+
+
+class FlagReward(gym.Wrapper):
+    """拉旗子通关时给予一次性大额奖励。
+
+    检测 ``info["flag_get"]``，为 True 时添加固定奖励。
+    放在所有裁剪类包装器之后，确保奖励值完整保留。
+    """
+
+    def __init__(self, env, reward_value=50.0):
+        super().__init__(env)
+        self.reward_value = float(reward_value)
+
+    def step(self, action):
+        obs, reward, terminated, truncated, info = self.env.step(action)
+        if info.get("flag_get"):
+            reward = float(reward) + self.reward_value
+        return obs, reward, terminated, truncated, info
+
+
 class NormalizeObservation(gym.ObservationWrapper):
     """将观测从 uint8 [0, 255] 归一化为 float32 [0, 1]。"""
 
