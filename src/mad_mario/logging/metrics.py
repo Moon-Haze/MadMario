@@ -1,9 +1,12 @@
 import csv
 import time
+from collections import deque
 from pathlib import Path
 
+import matplotlib
 import matplotlib.pyplot as plt
 import numpy as np
+from stable_baselines3.common.callbacks import BaseCallback
 from tqdm import tqdm
 
 
@@ -11,37 +14,250 @@ METRIC_DECIMALS = 3
 EPSILON_DECIMALS = 4
 MEAN_WINDOW = 100
 PLOT_CONFIGS = [
-    ("平均奖励曲线", "回合", "平均奖励"),
-    ("平均长度曲线", "回合", "平均长度"),
-    ("平均损失曲线", "回合", "平均损失"),
-    ("平均 Q 值曲线", "回合", "平均 Q 值"),
+    ("平均奖励曲线", "回合", "平均奖励", "reward"),
+    ("平均长度曲线", "回合", "平均长度", "length"),
+    ("平均损失曲线", "回合", "平均损失", "loss"),
+    ("平均 Q 值曲线", "回合", "平均 Q 值", "q"),
 ]
 
-plt.rcParams["font.sans-serif"] = ["Source Han Sans SC", "Noto Sans CJK SC", "LXGW WenKai Mono", "DejaVu Sans"]
+# Matplotlib 中文字体配置
+plt.rcParams["font.sans-serif"] = [
+    "Source Han Sans SC", "Noto Sans CJK SC", "LXGW WenKai Mono", "DejaVu Sans"
+]
 plt.rcParams["axes.unicode_minus"] = False
 
 
+# ──────────────────────────────────────────────
+# SB3 训练回调
+# ──────────────────────────────────────────────
+class MarioMetricsCallback(BaseCallback):
+    """在 SB3 训练过程中收集指标、写入 CSV、生成 PNG 图表。
+
+    - 从 ``infos`` 中追踪回合奖励 / 长度 / 最大 x 位置
+    - 从 SB3 logger 中读取 loss / learning_rate
+    - 每 ``log_interval`` 回合写一行 CSV、刷新 PNG
+    - 评估由 SB3 内置的 ``EvalCallback`` 完成
+    """
+
+    def __init__(
+        self,
+        save_dir: Path,
+        log_interval: int = 20,
+        verbose: int = 0,
+    ):
+        super().__init__(verbose)
+        self.save_dir = Path(save_dir)
+        self.log_interval = log_interval
+
+        # 每个 episode 的原始指标
+        self.ep_rewards: list[float] = []
+        self.ep_lengths: list[int] = []
+        self.ep_avg_losses: list[float] = []
+        self.ep_avg_qs: list[float] = []
+        self.ep_max_x_positions: list[float] = []
+        self.ep_noop_rates: list[float] = []
+        self.ep_most_used_actions: list[int] = []
+
+        # 移动平均历史（每次 record 追加一个点）
+        self.moving_avgs: list[list[float]] = [[], [], [], []]
+
+        # 当前 episode 内累积的 loss (用于计算 episode 平均 loss)
+        self._loss_buffer: deque[float] = deque(maxlen=256)
+
+        self.episode_count = 0
+        self.record_time = time.time()
+
+    # ── BaseCallback 接口 ──
+
+    def _on_training_start(self) -> None:
+        n_envs = self.training_env.num_envs
+        self._rew = np.zeros(n_envs, dtype=np.float32)
+        self._len = np.zeros(n_envs, dtype=np.int32)
+        self._max_x = np.zeros(n_envs, dtype=np.float32)
+        self._noop = np.zeros(n_envs, dtype=np.int32)
+        self._act_count = [np.zeros(self.model.action_space.n, dtype=np.int32) for _ in range(n_envs)]
+
+        # 防止同一个 episode_count 重复触发 record
+        self._last_recorded_episode = 0
+
+        self.save_dir.mkdir(parents=True, exist_ok=True)
+        self.csv_path = self.save_dir / "latest_metrics.csv"
+        self._ensure_csv_header()
+
+    def _on_step(self) -> bool:
+        """每个环境步调用一次。"""
+        infos = self.locals.get("infos", [])
+        dones = self.locals.get("dones", [])
+        rewards = self.locals.get("rewards", [])
+
+        # 收集 loss (SB3 的 DQN 在 train 阶段写入 logger)
+        train_loss = self.logger.name_to_value.get("train/loss", None)
+        if train_loss is not None:
+            self._loss_buffer.append(float(train_loss))
+
+        for i, info in enumerate(infos):
+            self._rew[i] += float(rewards[i]) if i < len(rewards) else 0.0
+            self._len[i] += 1
+            self._max_x[i] = max(self._max_x[i], float(info.get("x_pos", 0.0)))
+
+            # 动作计数
+            action = int(info.get("action", 0))
+            if i < len(self._act_count):
+                self._act_count[i][action] += 1
+                if action == 0:
+                    self._noop[i] += 1
+
+            # episode 结束时记录
+            if dones[i]:
+                ep_rew = float(self._rew[i])
+                ep_len = int(self._len[i])
+                ep_max_x = float(self._max_x[i])
+                noop_rate = float(self._noop[i]) / max(1, ep_len)
+                most_used = int(np.argmax(self._act_count[i]))
+                ep_loss = float(np.mean(self._loss_buffer)) if self._loss_buffer else 0.0
+
+                self.ep_rewards.append(ep_rew)
+                self.ep_lengths.append(ep_len)
+                self.ep_avg_losses.append(round(ep_loss, METRIC_DECIMALS))
+                self.ep_avg_qs.append(0.0)  # Q 值暂不记录
+                self.ep_max_x_positions.append(round(ep_max_x, METRIC_DECIMALS))
+                self.ep_noop_rates.append(round(noop_rate, METRIC_DECIMALS))
+                self.ep_most_used_actions.append(most_used)
+                self.episode_count += 1
+
+                # 重置累积器
+                self._rew[i] = 0.0
+                self._len[i] = 0
+                self._max_x[i] = 0.0
+                self._noop[i] = 0
+                self._act_count[i].fill(0)
+
+        # 定频记录（每个 episode_count 只触发一次）
+        if self.episode_count > 0 and self.episode_count % self.log_interval == 0 \
+                and self.episode_count > self._last_recorded_episode:
+            self._last_recorded_episode = self.episode_count
+            self._record()
+
+        return True
+
+    # ── 记录与绘图 ──
+
+    def _record(self) -> None:
+        """将最近 MEAN_WINDOW 个 episode 的均值写入 CSV 并刷新图表。"""
+        mean_rew = self._mean_last(self.ep_rewards)
+        mean_len = self._mean_last(self.ep_lengths)
+        mean_loss = self._mean_last(self.ep_avg_losses)
+        mean_q = self._mean_last(self.ep_avg_qs)
+        mean_max_x = self._mean_last(self.ep_max_x_positions)
+
+        self.moving_avgs[0].append(mean_rew)
+        self.moving_avgs[1].append(mean_len)
+        self.moving_avgs[2].append(mean_loss)
+        self.moving_avgs[3].append(mean_q)
+
+        now = time.time()
+        delta = round(now - self.record_time, METRIC_DECIMALS)
+        self.record_time = now
+
+        eps = self.model.exploration_rate if hasattr(self.model, "exploration_rate") else 0.0
+
+        row = [
+            self.episode_count,
+            self.num_timesteps,
+            round(eps, EPSILON_DECIMALS),
+            mean_rew, mean_len, mean_loss, mean_q,
+            mean_max_x,
+            self._mean_last(self.ep_noop_rates),
+            self._mean_last(self.ep_most_used_actions, as_int=True),
+            delta,
+        ]
+        self._append_csv(row)
+
+        tqdm.write(
+            f"回合={self.episode_count} | "
+            f"步数={self.num_timesteps} | "
+            f"探索率={eps:.{EPSILON_DECIMALS}f} | "
+            f"平均奖励={mean_rew:.3f} | "
+            f"平均长度={mean_len:.3f} | "
+            f"平均损失={mean_loss:.3f} | "
+            f"平均 Q 值={mean_q:.3f} | "
+            f"平均最大 x={mean_max_x:.3f} | "
+            f"时间间隔={delta:.3f}"
+        )
+
+        self._write_plots()
+
+    # ── CSV 操作 ──
+
+    def _ensure_csv_header(self):
+        if self.csv_path.exists() and self.csv_path.stat().st_size > 0:
+            return
+        self.csv_path.parent.mkdir(parents=True, exist_ok=True)
+        with open(self.csv_path, "w", newline="", encoding="utf-8") as f:
+            writer = csv.writer(f)
+            writer.writerow([
+                "episode", "step", "epsilon",
+                "mean_reward", "mean_length", "mean_loss", "mean_q",
+                "mean_max_x_pos", "mean_noop_rate", "mean_most_used_action",
+                "time_delta",
+            ])
+
+    def _append_csv(self, row: list):
+        with open(self.csv_path, "a", newline="", encoding="utf-8") as f:
+            csv.writer(f).writerow(row)
+
+    # ── 绘图 ──
+
+    def _write_plots(self):
+        for moving_avg, (title, xlabel, ylabel, fname) in zip(self.moving_avgs, PLOT_CONFIGS):
+            plot_path = self.save_dir / f"latest_{fname}.png"
+            plot_path.parent.mkdir(parents=True, exist_ok=True)
+            plt.figure(figsize=(11.69, 8.27))
+            episodes = range(1, len(moving_avg) + 1)
+            plt.plot(episodes, moving_avg, label=ylabel, linewidth=2)
+            plt.title(title)
+            plt.xlabel(xlabel)
+            plt.ylabel(ylabel)
+            plt.grid(True, linestyle="--", alpha=0.5)
+            plt.legend()
+            plt.tight_layout()
+            plt.savefig(plot_path)
+            plt.close()
+
+    # ── 工具 ──
+
+    def _mean_last(self, values, as_int=False):
+        if not values:
+            return 0
+        mean_val = float(np.mean(values[-MEAN_WINDOW:]))
+        return int(round(mean_val)) if as_int else round(mean_val, METRIC_DECIMALS)
+
+
+# ──────────────────────────────────────────────
+# 旧版 MetricLogger（保留以供参考，不再主动使用）
+# ──────────────────────────────────────────────
 class MetricLogger:
+    """保持向后兼容的旧版日志记录器。新代码请使用 ``MarioMetricsCallback``。"""
+
     def __init__(self, csv_paths: list[Path], plot_path_groups: list[list[Path]], reset: bool = False):
         self.csv_paths = csv_paths
         self.plot_path_groups = plot_path_groups
-
         if reset:
             self._clear_outputs()
         for csv_path in self.csv_paths:
             self._ensure_csv_header(csv_path)
 
-        self.ep_rewards = []
-        self.ep_lengths = []
-        self.ep_avg_losses = []
-        self.ep_avg_qs = []
-        self.ep_max_x_positions = []
-        self.ep_noop_rates = []
-        self.ep_most_used_actions = []
-        self.moving_avgs = [[], [], [], []]
-        self.max_x_pos_avgs = []
-        self.noop_rate_avgs = []
-        self.most_used_action_avgs = []
+        self.ep_rewards: list[float] = []
+        self.ep_lengths: list[int] = []
+        self.ep_avg_losses: list[float] = []
+        self.ep_avg_qs: list[float] = []
+        self.ep_max_x_positions: list[float] = []
+        self.ep_noop_rates: list[float] = []
+        self.ep_most_used_actions: list[int] = []
+        self.moving_avgs: list[list[float]] = [[], [], [], []]
+        self.max_x_pos_avgs: list[float] = []
+        self.noop_rate_avgs: list[float] = []
+        self.most_used_action_avgs: list[float] = []
         if not reset:
             self._load_history_from_csv(self.csv_paths[0])
         self.init_episode()
@@ -63,23 +279,15 @@ class MetricLogger:
         with open(csv_path, "w", newline="", encoding="utf-8") as f:
             writer = csv.writer(f)
             writer.writerow([
-                "episode",
-                "step",
-                "epsilon",
-                "mean_reward",
-                "mean_length",
-                "mean_loss",
-                "mean_q",
-                "mean_max_x_pos",
-                "mean_noop_rate",
-                "mean_most_used_action",
+                "episode", "step", "epsilon",
+                "mean_reward", "mean_length", "mean_loss", "mean_q",
+                "mean_max_x_pos", "mean_noop_rate", "mean_most_used_action",
                 "time_delta",
             ])
 
     def _load_history_from_csv(self, csv_path):
         if not csv_path.exists() or csv_path.stat().st_size == 0:
             return
-
         with open(csv_path, "r", newline="", encoding="utf-8") as f:
             reader = csv.DictReader(f)
             for row in reader:
@@ -103,18 +311,20 @@ class MetricLogger:
             self.curr_ep_loss_length += 1
 
     def log_episode(self, max_x_pos=0.0, noop_rate=0.0, most_used_action=0):
-        """记录一个回合的结束。"""
         if self.curr_ep_loss_length == 0:
             ep_avg_loss = 0
             ep_avg_q = 0
         else:
-            ep_avg_loss = self._round_metric(self.curr_ep_loss / self.curr_ep_loss_length)
-            ep_avg_q = self._round_metric(self.curr_ep_q / self.curr_ep_loss_length)
-        self.log_episode_metrics(self.curr_ep_reward, self.curr_ep_length, ep_avg_loss, ep_avg_q, max_x_pos, noop_rate, most_used_action)
+            ep_avg_loss = round(self.curr_ep_loss / self.curr_ep_loss_length, METRIC_DECIMALS)
+            ep_avg_q = round(self.curr_ep_q / self.curr_ep_loss_length, METRIC_DECIMALS)
+        self.log_episode_metrics(
+            self.curr_ep_reward, self.curr_ep_length,
+            ep_avg_loss, ep_avg_q, max_x_pos, noop_rate, most_used_action,
+        )
         self.init_episode()
 
-    def log_episode_metrics(self, ep_reward, ep_length, ep_avg_loss=0, ep_avg_q=0, max_x_pos=0.0, noop_rate=0.0, most_used_action=0):
-        """记录一个已经统计完成的回合。"""
+    def log_episode_metrics(self, ep_reward, ep_length, ep_avg_loss=0, ep_avg_q=0,
+                            max_x_pos=0.0, noop_rate=0.0, most_used_action=0):
         self.ep_rewards.append(ep_reward)
         self.ep_lengths.append(ep_length)
         self.ep_avg_losses.append(ep_avg_loss)
@@ -130,16 +340,10 @@ class MetricLogger:
         self.curr_ep_q = 0.0
         self.curr_ep_loss_length = 0
 
-    def _round_metric(self, value):
-        return round(float(value), METRIC_DECIMALS)
-
-    def _round_epsilon(self, value):
-        return round(float(value), EPSILON_DECIMALS)
-
     def _mean_last(self, values):
         if not values:
             return 0.0
-        return self._round_metric(np.mean(values[-MEAN_WINDOW:]))
+        return round(float(np.mean(values[-MEAN_WINDOW:])), METRIC_DECIMALS)
 
     def record(self, episode, epsilon, step, emit=False):
         mean_ep_reward = self._mean_last(self.ep_rewards)
@@ -149,31 +353,24 @@ class MetricLogger:
         mean_max_x_pos = self._mean_last(self.ep_max_x_positions)
         mean_noop_rate = self._mean_last(self.ep_noop_rates)
         mean_most_used_action = self._mean_last(self.ep_most_used_actions)
+
+        self.moving_avgs[0].append(mean_ep_reward)
+        self.moving_avgs[1].append(mean_ep_length)
+        self.moving_avgs[2].append(mean_ep_loss)
+        self.moving_avgs[3].append(mean_ep_q)
         self.max_x_pos_avgs.append(mean_max_x_pos)
         self.noop_rate_avgs.append(mean_noop_rate)
         self.most_used_action_avgs.append(mean_most_used_action)
-        for moving_avg, mean in zip(
-            self.moving_avgs,
-            [mean_ep_reward, mean_ep_length, mean_ep_loss, mean_ep_q],
-        ):
-            moving_avg.append(mean)
 
-        last_record_time = self.record_time
-        self.record_time = time.time()
-        time_since_last_record = self._round_metric(self.record_time - last_record_time)
+        now = time.time()
+        delta = round(now - self.record_time, METRIC_DECIMALS)
+        self.record_time = now
 
         row = [
-            episode,
-            step,
-            self._round_epsilon(epsilon),
-            mean_ep_reward,
-            mean_ep_length,
-            mean_ep_loss,
-            mean_ep_q,
-            mean_max_x_pos,
-            mean_noop_rate,
-            mean_most_used_action,
-            time_since_last_record,
+            episode, step, round(epsilon, EPSILON_DECIMALS),
+            mean_ep_reward, mean_ep_length, mean_ep_loss, mean_ep_q,
+            mean_max_x_pos, mean_noop_rate, round(mean_most_used_action, 0),
+            delta,
         ]
         for csv_path in self.csv_paths:
             with open(csv_path, "a", newline="", encoding="utf-8") as f:
@@ -183,9 +380,8 @@ class MetricLogger:
             return
 
         tqdm.write(
-            f"回合={episode} | "
-            f"步数={step} | "
-            f"探索率={self._round_epsilon(epsilon):.{EPSILON_DECIMALS}f} | "
+            f"回合={episode} | 步数={step} | "
+            f"探索率={round(epsilon, EPSILON_DECIMALS):.{EPSILON_DECIMALS}f} | "
             f"平均奖励={mean_ep_reward:.3f} | "
             f"平均长度={mean_ep_length:.3f} | "
             f"平均损失={mean_ep_loss:.3f} | "
@@ -193,27 +389,27 @@ class MetricLogger:
             f"平均最大 x={mean_max_x_pos:.3f} | "
             f"平均 NOOP={mean_noop_rate:.3f} | "
             f"常用动作={int(mean_most_used_action):d} | "
-            f"时间间隔={time_since_last_record:.3f}"
+            f"时间间隔={delta:.3f}"
         )
 
         for plot_paths in self.plot_path_groups:
             self._write_plots(plot_paths)
 
-    def _write_plots(self, plot_paths):
-        for moving_avg, plot_path, (title, xlabel, ylabel) in zip(
-            self.moving_avgs,
-            plot_paths,
-            PLOT_CONFIGS,
-        ):
-            plot_path.parent.mkdir(parents=True, exist_ok=True)
-            plt.figure(figsize=(11.69, 8.27))
-            episodes = range(1, len(moving_avg) + 1)
-            plt.plot(episodes, moving_avg, label=ylabel, linewidth=2)
-            plt.title(title)
-            plt.xlabel(xlabel)
-            plt.ylabel(ylabel)
-            plt.grid(True, linestyle="--", alpha=0.5)
-            plt.legend()
-            plt.tight_layout()
-            plt.savefig(plot_path)
-            plt.close()
+    def _write_plots(self, plot_paths=None):
+        paths = plot_paths or [self.plot_path_groups[0]] if self.plot_path_groups else []
+        for plot_group in ([paths] if not isinstance(paths[0], list) else paths):
+            for moving_avg, plot_path, (title, xlabel, ylabel, fname) in zip(
+                self.moving_avgs, plot_group, PLOT_CONFIGS,
+            ):
+                plot_path.parent.mkdir(parents=True, exist_ok=True)
+                plt.figure(figsize=(11.69, 8.27))
+                episodes = range(1, len(moving_avg) + 1)
+                plt.plot(episodes, moving_avg, linewidth=2)
+                plt.title(title)
+                plt.xlabel(xlabel)
+                plt.ylabel(ylabel)
+                plt.grid(True, linestyle="--", alpha=0.5)
+                plt.legend([ylabel])
+                plt.tight_layout()
+                plt.savefig(plot_path)
+                plt.close()

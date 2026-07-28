@@ -1,116 +1,155 @@
 from __future__ import annotations
 
 import random
-from dataclasses import dataclass
+from pathlib import Path
 from typing import Any
 
 import numpy as np
+from stable_baselines3 import DQN
+from stable_baselines3.common.callbacks import CallbackList, CheckpointCallback, EvalCallback
+from stable_baselines3.common.monitor import Monitor
+from stable_baselines3.common.vec_env import SubprocVecEnv
+from tqdm import tqdm
 
-from mad_mario.agent.checkpoint import CheckpointManager
-from mad_mario.agent.mario import Mario
-from mad_mario.config import AppConfig
-from mad_mario.env.factory import make_mario_env, make_vector_env
-from mad_mario.logging.metrics import MetricLogger
-from mad_mario.training.artifacts import RunArtifacts, create_artifacts
-from mad_mario.training.loops import train_single_env_loop, train_vector_env_loop
-
-
-@dataclass
-class SetupResult:
-    """训练启动后的所有组件，供训练循环或 Notebook 使用。"""
-    env: Any | None = None          # 单环境时有效
-    envs: Any | None = None         # 并行环境时有效
-    states: np.ndarray | None = None
-    agent: Mario | None = None
-    action_dim: int = 0              # 动作空间维度
-    checkpoint_manager: CheckpointManager | None = None
-    logger: MetricLogger | None = None
-    active_levels: list[str] | None = None
-    loaded: bool = False
+from mad_mario.config import AppConfig, compatible_save_root, resolve_checkpoint
+from mad_mario.env.factory import make_mario_env
+from mad_mario.logging.metrics import MarioMetricsCallback
 
 
-def build_agent(config: AppConfig, action_dim):
-    return Mario(
-        state_dim=config.env.state_dim,
-        action_dim=action_dim,
-        agent_config=config.agent,
-        training_config=config.training,
-    )
-
-
-def _active_levels(config):
-    """返回实际使用的关卡列表，单关卡时返回 None（保持兼容）。"""
+def _make_env_thunks(config: AppConfig) -> list[callable]:
+    """为并行环境创建 env thunk 列表，支持多关卡分配。"""
     levels = config.env.levels
+    num_envs = config.artifacts.num_envs
+
     if levels and len(levels) > 1:
-        return levels
-    return None
+        # 多关卡训练：每个子环境随机分配一个关卡
+        thunks = []
+        for _ in range(num_envs):
+            level_name = random.choice(levels)
+            thunks.append(_env_thunk(config.env, level_name))
+        return thunks
+    else:
+        return [_env_thunk(config.env) for _ in range(num_envs)]
 
 
-def setup_training(config: AppConfig, artifacts: RunArtifacts | None = None) -> SetupResult:
-    """创建训练所需的所有组件，CLI 和 Notebook 共用此函数。"""
-    if artifacts is None:
-        artifacts = create_artifacts(config.artifacts)
+def _env_thunk(env_config, level_name: str | None = None):
+    """返回一个无参 callable，创建单个 Mario 环境。"""
+    return lambda: make_mario_env(config=env_config, level_name=level_name)
 
+
+def train(config: AppConfig) -> None:
+    """使用 Stable-Baselines3 DQN 训练 Mario 智能体。
+
+    - 创建或加载 DQN 模型
+    - 每 ``save_freq`` 步自动保存 checkpoint（含经验回放缓冲区）
+    - 每 ``log_interval`` 回合输出日志并刷新图表
+    - 每 ``eval_freq`` 步执行一次评估
+    - 支持 ``Ctrl+C`` 安全中断后恢复
+    """
+    save_root = config.artifacts.save_root
+    save_root.mkdir(parents=True, exist_ok=True)
+
+    # ── 1. 创建并行环境 ──
+    tqdm.write(f"创建 {config.artifacts.num_envs} 个并行环境...")
+    env_fns = _make_env_thunks(config)
+    env = SubprocVecEnv(env_fns)
+
+    # ── 2. DQN 模型参数 ──
+    policy_kwargs = config.sb3.policy_kwargs or {}
+    dqn_params: dict[str, Any] = dict(
+        policy="CnnPolicy",
+        env=env,
+        learning_rate=config.sb3.learning_rate,
+        buffer_size=config.sb3.buffer_size,
+        learning_starts=config.sb3.learning_starts,
+        batch_size=config.sb3.batch_size,
+        tau=config.sb3.tau,
+        gamma=config.sb3.gamma,
+        train_freq=config.sb3.train_freq,
+        gradient_steps=config.sb3.gradient_steps,
+        target_update_interval=config.sb3.target_update_interval,
+        exploration_fraction=config.sb3.exploration_fraction,
+        exploration_initial_eps=config.sb3.exploration_initial_eps,
+        exploration_final_eps=config.sb3.exploration_final_eps,
+        max_grad_norm=config.sb3.max_grad_norm,
+        seed=config.sb3.seed,
+        device="auto",
+        policy_kwargs=policy_kwargs,
+        verbose=0,
+        stats_window_size=100,
+        tensorboard_log=str(save_root / "tensorboard"),
+    )
+
+    # ── 3. 创建或加载模型 ──
+    model: DQN | None = None
     loaded = False
-    active_levels = _active_levels(config)
 
-    if config.training.vector:
-        envs = make_vector_env(config.training.num_envs, config.env)
-        states, _ = envs.reset()
-        action_dim = envs.single_action_space.n
-        agent = build_agent(config, action_dim)
-        checkpoint_manager = CheckpointManager(config.artifacts, artifacts)
-        loaded = checkpoint_manager.load_if_available(agent) is not None
-        logger = MetricLogger(
-            artifacts.metrics_csv_paths,
-            artifacts.plot_path_groups,
-            reset=not loaded,
-        )
-        return SetupResult(
-            envs=envs, states=states,
-            agent=agent, action_dim=action_dim,
-            checkpoint_manager=checkpoint_manager,
-            logger=logger, loaded=loaded,
-        )
-    else:
-        env = make_mario_env(config.env)
-        action_dim = env.action_space.n
-        agent = build_agent(config, action_dim)
-        checkpoint_manager = CheckpointManager(config.artifacts, artifacts)
-        loaded = checkpoint_manager.load_if_available(agent) is not None
-        logger = MetricLogger(
-            artifacts.metrics_csv_paths,
-            artifacts.plot_path_groups,
-            reset=not loaded,
-        )
-        return SetupResult(
-            env=env, agent=agent, action_dim=action_dim,
-            checkpoint_manager=checkpoint_manager,
-            logger=logger, active_levels=active_levels, loaded=loaded,
-        )
+    if config.artifacts.resume:
+        ckpt_path = resolve_checkpoint(config.artifacts)
+        if ckpt_path is not None and ckpt_path.exists():
+            try:
+                tqdm.write(f"正在恢复 checkpoint: {ckpt_path}")
+                model = DQN.load(ckpt_path, env=env, device="auto")
+                loaded = True
+            except Exception as exc:
+                tqdm.write(f"checkpoint 加载失败，将从头开始训练。原因: {exc}")
 
+    if model is None:
+        tqdm.write("从头开始创建 DQN 模型...")
+        model = DQN(**dqn_params)
 
-def train(config: AppConfig):
-    if config.env.movement != "right_only":
-        print("建议先用 --movement right_only 学会稳定向右，再尝试 simple/complex。")
-    artifacts = create_artifacts(config.artifacts)
-    if config.training.vector:
-        train_vector(config, artifacts)
-    else:
-        train_single(config, artifacts)
-
-
-def train_single(config: AppConfig, artifacts):
-    result = setup_training(config, artifacts)
-    train_single_env_loop(
-        result.env, result.agent, result.logger,
-        result.checkpoint_manager, config, result.active_levels,
+    # ── 4. 回调 ──
+    save_freq = max(config.artifacts.save_freq // config.artifacts.num_envs, 1)
+    checkpoint_callback = CheckpointCallback(
+        save_freq=save_freq,
+        save_path=str(save_root / "snapshots"),
+        name_prefix="mario_dqn",
+        save_replay_buffer=config.artifacts.save_replay_buffer,
+        save_vecnormalize=False,
+        verbose=1,
     )
 
-
-def train_vector(config: AppConfig, artifacts):
-    result = setup_training(config, artifacts)
-    train_vector_env_loop(
-        result.envs, result.states, result.agent, result.logger,
-        result.checkpoint_manager, config,
+    # 评估回调（SB3 内置，自动保存 best model + 记录评估日志）
+    eval_env = SubprocVecEnv([lambda: Monitor(_env_thunk(config.env)())])
+    eval_callback = EvalCallback(
+        eval_env,
+        best_model_save_path=str(save_root / "best_model"),
+        log_path=str(save_root / "eval_logs"),
+        eval_freq=max(config.artifacts.eval_freq // config.artifacts.num_envs, 1),
+        n_eval_episodes=config.artifacts.eval_episodes,
+        deterministic=True,
+        verbose=1,
     )
+
+    # 自定义指标回调（CSV + PNG 图表 + Mario 特有指标）
+    metrics_callback = MarioMetricsCallback(
+        save_dir=save_root,
+        log_interval=config.artifacts.log_interval,
+        verbose=1,
+    )
+
+    callbacks = CallbackList([checkpoint_callback, eval_callback, metrics_callback])
+
+    # ── 5. 训练 ──
+    tqdm.write(
+        f"开始训练（总步数={config.sb3.total_timesteps}, "
+        f"并行数={config.artifacts.num_envs}, "
+        f"保存间隔={config.artifacts.save_freq} 步）"
+    )
+    try:
+        model.learn(
+            total_timesteps=config.sb3.total_timesteps,
+            callback=callbacks,
+            reset_num_timesteps=not loaded,
+            log_interval=1,  # SB3 内部日志频率（每 N 步），和我们的回调独立
+        )
+    except KeyboardInterrupt:
+        tqdm.write("\n检测到键盘中断，正在保存最终 checkpoint...")
+
+    # ── 6. 保存 ──
+    final_path = str(save_root / "mario_dqn_final.zip")
+    model.save(final_path)
+    tqdm.write(f"最终模型已保存到 {final_path}")
+
+    env.close()
+    tqdm.write("训练完成。")

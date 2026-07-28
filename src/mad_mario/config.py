@@ -6,6 +6,9 @@ from dataclasses import dataclass
 from pathlib import Path
 
 
+# ──────────────────────────────────────────────
+# 环境配置（不变，保留全部字段）
+# ──────────────────────────────────────────────
 @dataclass
 class EnvConfig:
     game: str = "SuperMarioBros"
@@ -31,82 +34,78 @@ class EnvConfig:
     score_reward_scale: float = 0.01
     flag_reward_enabled: bool = True
     flag_reward_value: float = 50.0
-    normalize_observation: bool = False
 
 
+# ──────────────────────────────────────────────
+# SB3 DQN 超参数配置
+# ──────────────────────────────────────────────
 @dataclass
-class AgentConfig:
-    replay_capacity: int = 100000
-    gamma: float = 0.99
+class SB3Config:
+    """映射到 stable-baselines3 DQN 构造参数。"""
+    total_timesteps: int = 10_000_000
     learning_rate: float = 0.0000625
-    lr_warmup_steps: int = 10000
-    lr_min_ratio: float = 0.1
-    exploration_rate: float = 1.0
-    exploration_decay_steps: int = int(2e6)
-    exploration_rate_min: float = 0.02
-    gradient_clip_norm: float = 10.0
-    n_step: int = 3
-    noisy_std_init: float = 0.5
-    per_alpha: float = 0.6
-    per_beta_start: float = 0.4
-    per_beta_frames: int = int(2e6)
-    per_epsilon: float = 1e-6
+    buffer_size: int = 50_000
+    learning_starts: int = 50_000
+    batch_size: int = 32
+    tau: float = 1.0
+    gamma: float = 0.99
+    train_freq: int = 4  # 每 N 步训练一次
+    gradient_steps: int = 1
+    target_update_interval: int = 8_000
+    exploration_fraction: float = 0.1
+    exploration_initial_eps: float = 1.0
+    exploration_final_eps: float = 0.02
+    max_grad_norm: float = 10.0
+    seed: int = 42
+    policy_kwargs: dict | None = None
 
 
+# ──────────────────────────────────────────────
+# 训练工件配置（checkpoint / 日志 / 并行环境）
+# ──────────────────────────────────────────────
 @dataclass
-class ArtifactConfig:
+class SB3ArtifactConfig:
     save_root: Path = Path("checkpoints")
     checkpoint: Path | None = None
     resume: bool = True
-    keep_runs: bool = False
     run_name: str | None = None
-    save_every: int = int(5e5)
-
-
-@dataclass
-class TrainingConfig:
-    episodes: int = 20000
-    batch_size: int = 32
-    burnin: int = int(5e4)
-    learn_every: int = 4
-    sync_every: int = int(8e3)
-    record_every: int = 20
-    eval_every: int = 50
+    save_freq: int = 100_000          # 每隔多少步保存一次 checkpoint
+    save_replay_buffer: bool = False  # 保存经验回放缓冲区（文件很大）
+    eval_freq: int = 10_000           # 每隔多少步执行一次评估
     eval_episodes: int = 3
+    log_interval: int = 20            # 每隔多少 episode 输出日志+刷新图表
     num_envs: int = max(1, (os.cpu_count() or 2) // 2)
-    vector: bool = False
 
 
+# ──────────────────────────────────────────────
+# 顶层配置
+# ──────────────────────────────────────────────
 @dataclass
 class AppConfig:
     env: EnvConfig
-    agent: AgentConfig
-    artifacts: ArtifactConfig
-    training: TrainingConfig
+    sb3: SB3Config
+    artifacts: SB3ArtifactConfig
 
 
+# ──────────────────────────────────────────────
+# 世界 / 关卡解析工具（不变）
+# ──────────────────────────────────────────────
 MAX_WORLD = 8
+MAX_LEVEL = 4
 
 
 def _parse_world_token(token: str) -> list[int]:
-    """解析单个 world token：``3`` → ``[3]``，``1-3`` → ``[1, 2, 3]``。"""
     token = token.strip()
     if "-" in token:
         parts = token.split("-", maxsplit=1)
         if len(parts) != 2 or not parts[0] or not parts[1]:
-            raise argparse.ArgumentTypeError(
-                f"世界范围格式错误: {token!r}，应使用 1-3 格式"
-            )
+            raise argparse.ArgumentTypeError(f"世界范围格式错误: {token!r}，应使用 1-3 格式")
         try:
             start, end = int(parts[0]), int(parts[1])
         except ValueError as exc:
-            raise argparse.ArgumentTypeError(
-                f"世界范围必须为数字: {token!r}"
-            ) from exc
+            raise argparse.ArgumentTypeError(f"世界范围必须为数字: {token!r}") from exc
         if start > end:
-            raise argparse.ArgumentTypeError(
-                f"世界范围起始值 {start} 大于结束值 {end}"
-            )
+            raise argparse.ArgumentTypeError(f"世界范围起始值 {start} 大于结束值 {end}")
         if not (1 <= start <= MAX_WORLD) or not (1 <= end <= MAX_WORLD):
             raise argparse.ArgumentTypeError(
                 f"世界号超出范围，Super Mario 的世界号为 1～{MAX_WORLD}，得到: {token!r}"
@@ -116,39 +115,24 @@ def _parse_world_token(token: str) -> list[int]:
         try:
             w = int(token)
         except ValueError as exc:
-            raise argparse.ArgumentTypeError(
-                f"世界号格式错误: {token!r}，应为数字或范围如 1-3"
-            ) from exc
+            raise argparse.ArgumentTypeError(f"世界号格式错误: {token!r}，应为数字或范围如 1-3") from exc
         if not (1 <= w <= MAX_WORLD):
-            raise argparse.ArgumentTypeError(
-                f"世界号 {w} 超出范围，Super Mario 的世界号为 1～{MAX_WORLD}"
-            )
+            raise argparse.ArgumentTypeError(f"世界号 {w} 超出范围，Super Mario 的世界号为 1～{MAX_WORLD}")
         return [w]
 
 
 def _worlds_type(value: str) -> list[int]:
-    """argparse type: 解析并校验世界号列表，支持逗号和范围。
-
-    支持格式:
-    - ``1,3,5`` — 逗号分隔
-    - ``1-4`` — 范围（含两端）
-    - ``1-3,5,7-8`` — 混合
-    """
     try:
         tokens = [t.strip() for t in value.split(",") if t.strip()]
     except Exception as exc:
         raise argparse.ArgumentTypeError("worlds 参数格式错误") from exc
     if not tokens:
         raise argparse.ArgumentTypeError("worlds 参数不能为空")
-
     worlds = []
     for token in tokens:
         worlds.extend(_parse_world_token(token))
-
     if not worlds:
         raise argparse.ArgumentTypeError("worlds 参数不能为空")
-
-    # 去重并保持顺序
     seen = set()
     unique = []
     for w in worlds:
@@ -158,16 +142,7 @@ def _worlds_type(value: str) -> list[int]:
     return unique
 
 
-MAX_LEVEL = 4
-
-
 def _levels_type(value: str) -> list[str]:
-    """argparse type: 解析并校验关卡列表。
-
-    支持两种格式:
-    - 纯关卡号如 ``1,2``（与 ``--world`` / ``--worlds`` 组合使用）
-    - world-level 格式如 ``1-1,2-1``
-    """
     try:
         parts = [v.strip() for v in value.split(",") if v.strip()]
     except Exception as exc:
@@ -178,58 +153,55 @@ def _levels_type(value: str) -> list[str]:
         if "-" in p:
             tokens = p.split("-")
             if len(tokens) != 2:
-                raise argparse.ArgumentTypeError(
-                    f"关卡格式错误: {p!r}，应使用 world-level 格式如 1-1"
-                )
+                raise argparse.ArgumentTypeError(f"关卡格式错误: {p!r}，应使用 world-level 格式如 1-1")
             try:
                 w, lv = int(tokens[0]), int(tokens[1])
             except ValueError as exc:
-                raise argparse.ArgumentTypeError(
-                    f"关卡中的世界号和关卡号必须为数字: {p!r}"
-                ) from exc
+                raise argparse.ArgumentTypeError(f"关卡中的世界号和关卡号必须为数字: {p!r}") from exc
             if not (1 <= w <= MAX_WORLD):
-                raise argparse.ArgumentTypeError(
-                    f"关卡 {p!r} 中的世界号 {w} 超出范围，Super Mario 的世界号为 1～{MAX_WORLD}"
-                )
+                raise argparse.ArgumentTypeError(f"关卡 {p!r} 中的世界号 {w} 超出范围，世界号为 1～{MAX_WORLD}")
             if not (1 <= lv <= MAX_LEVEL):
-                raise argparse.ArgumentTypeError(
-                    f"关卡 {p!r} 中的关卡号 {lv} 超出范围，每世界关卡号为 1～{MAX_LEVEL}"
-                )
+                raise argparse.ArgumentTypeError(f"关卡 {p!r} 中的关卡号 {lv} 超出范围，关卡号为 1～{MAX_LEVEL}")
         else:
             try:
                 lv = int(p)
             except ValueError as exc:
-                raise argparse.ArgumentTypeError(
-                    f"关卡格式错误: {p!r}，应为数字或 world-level 格式如 1-1"
-                ) from exc
+                raise argparse.ArgumentTypeError(f"关卡格式错误: {p!r}，应为数字或 world-level 格式如 1-1") from exc
             if not (1 <= lv <= MAX_LEVEL):
-                raise argparse.ArgumentTypeError(
-                    f"关卡号 {lv} 超出范围，每世界关卡号为 1～{MAX_LEVEL}"
-                )
+                raise argparse.ArgumentTypeError(f"关卡号 {lv} 超出范围，关卡号为 1～{MAX_LEVEL}")
     return parts
 
 
 def build_env_name(game: str, world: int, level: int, version: int = 0) -> str:
-    """构建完整的 Gym 环境 ID。"""
     return f"{game}-{world}-{level}-v{version}"
 
 
 def _expand_level(level_id: str, game: str = "SuperMarioBros", version: int = 0) -> str:
-    """将简写关卡名转为完整 env ID，如 1-1 → SuperMarioBros-1-1-v0。"""
     level_id = level_id.strip()
     if "-v" in level_id:
         return level_id
     return build_env_name(game, *map(int, level_id.split("-")), version)
 
 
+def _format_worlds(worlds: list[int]) -> str:
+    """将世界号列表格式化为紧凑字符串。
+
+    连续范围用 ``-``（如 1-8），非连续用 ``,``（如 1,3,5）。
+    单个值直接返回数字。
+    """
+    if len(worlds) == 1:
+        return str(worlds[0])
+    # 检查是否连续
+    is_consecutive = all(worlds[i] + 1 == worlds[i + 1] for i in range(len(worlds) - 1))
+    if is_consecutive:
+        return f"{worlds[0]}-{worlds[-1]}"
+    return ",".join(str(w) for w in worlds)
+
+
 def compatible_save_root(save_root: Path, config: EnvConfig) -> Path:
     if config.worlds and len(config.worlds) > 1:
-        worlds_str = "-".join(str(w) for w in config.worlds)
-        if config.levels:
-            levels_str = _extract_level_numbers(config.levels, config.worlds)
-        else:
-            levels_str = str(config.level)
-        folder = f"worlds-{worlds_str}_levels-{levels_str}-v{config.version}_{config.movement}"
+        worlds_str = _format_worlds(config.worlds)
+        folder = f"worlds-{worlds_str}-v{config.version}_{config.movement}"
     elif config.levels and len(config.levels) > 1:
         folder = f"multi-v{config.version}_{config.movement}"
     else:
@@ -237,110 +209,126 @@ def compatible_save_root(save_root: Path, config: EnvConfig) -> Path:
     return save_root / folder
 
 
-def _extract_level_numbers(levels: list[str], worlds: list[int]) -> str:
-    """从完整 env ID 列表中提取关卡号，去重后拼成短字符串。"""
-    seen = set()
-    numbers = []
-    for env_id in levels:
-        parts = env_id.split("-")
-        if len(parts) >= 2:
-            try:
-                level_num = int(parts[-2])
-            except ValueError:
-                continue
-            if level_num not in seen:
-                seen.add(level_num)
-                numbers.append(str(level_num))
-    return "-".join(numbers) if numbers else "all"
+def resolve_checkpoint(config: SB3ArtifactConfig) -> Path | None:
+    """解析 SB3 checkpoint 路径。
 
-
-def resolve_checkpoint(config: ArtifactConfig) -> Path | None:
+    SB3 使用 .zip 格式，查找顺序：
+    1. config.checkpoint（用户指定）
+    2. save_root / "mario_dqn_final.zip"
+    3. save_root 中步数最大的 mario_dqn_*_steps.zip
+    """
     if not config.resume:
         return None
     if config.checkpoint is not None:
         return config.checkpoint
 
-    latest_checkpoint = config.save_root / "latest.chkpt"
-    return latest_checkpoint if latest_checkpoint.exists() else None
+    save_root = config.save_root
+    # 尝试最终 checkpoint
+    final = save_root / "mario_dqn_final.zip"
+    if final.exists():
+        return final
+
+    # 尝试带步数的 checkpoint（取最新）
+    step_zips = list(save_root.glob("mario_dqn_*_steps.zip"))
+    if step_zips:
+        # 按修改时间取最新的
+        step_zips.sort(key=lambda p: p.stat().st_mtime, reverse=True)
+        return step_zips[0]
+
+    return None
 
 
+# ──────────────────────────────────────────────
+# CLI 解析器
+# ──────────────────────────────────────────────
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description="训练或播放 Super Mario DQN 智能体")
+    parser = argparse.ArgumentParser(description="训练或播放 Super Mario DQN 智能体（基于 Stable-Baselines3）")
     subparsers = parser.add_subparsers(dest="command", required=True)
-
-    train = subparsers.add_parser("train", help="训练 Mario 智能体")
-    add_train_args(train)
-
-    play = subparsers.add_parser("play", help="播放训练好的 Mario 智能体")
-    add_play_args(play)
+    add_train_args(subparsers.add_parser("train", help="训练 Mario 智能体"))
+    add_play_args(subparsers.add_parser("play", help="播放训练好的 Mario 智能体"))
     return parser
 
 
 def add_train_args(parser: argparse.ArgumentParser) -> None:
-    parser.add_argument("--episodes", type=int, default=TrainingConfig.episodes, help="训练回合数")
-    parser.add_argument("--game", type=str, default=EnvConfig.game, help="游戏名称")
-    parser.add_argument("--world", type=int, default=EnvConfig.world, help="世界/大关")
-    parser.add_argument("--level", type=int, default=EnvConfig.level, help="关卡")
-    parser.add_argument("--version", type=int, default=EnvConfig.version, help="环境版本")
-    parser.add_argument(
-        "--levels",
-        type=_levels_type,
-        default=None,
-        help="多关卡训练，逗号分隔如 1-1,1-2,1-3（世界号 1～8，关卡号 1～4）",
-    )
-    parser.add_argument(
-        "--worlds",
-        type=_worlds_type,
-        default=None,
-        help="多世界训练，逗号分隔和范围如 1-3,5,7-8（世界号 1～8）；每个世界自动使用关卡 1～4",
-    )
-    parser.add_argument(
-        "--movement",
-        choices=("right_only", "simple", "complex"),
-        default=EnvConfig.movement,
-        help="动作空间预设",
-    )
-    parser.add_argument("--vector", action="store_true", help="启用并行环境训练")
-    parser.add_argument("--num-envs", type=int, default=TrainingConfig.num_envs, help="并行环境数量")
-    parser.add_argument("--save-root", type=Path, default=ArtifactConfig.save_root, help="checkpoint 根目录")
-    parser.add_argument("--flat-save-root", action="store_true", help="直接使用 checkpoint 根目录，不按兼容参数分子目录")
-    parser.add_argument("--checkpoint", type=Path, default=None, help="指定要恢复的 checkpoint")
-    parser.add_argument("--no-resume", action="store_true", help="忽略 latest checkpoint，从头开始训练")
-    parser.add_argument("--keep-runs", action="store_true", help="额外保留本次训练的 run 目录")
-    parser.add_argument("--run-name", default=None, help="指定 run 目录名称")
-    parser.add_argument("--record-every", type=int, default=TrainingConfig.record_every, help="每隔多少回合打印指标、刷新图表并保存 checkpoint")
-    parser.add_argument("--eval-every", type=int, default=TrainingConfig.eval_every, help="每隔多少回合执行一次贪心评估")
-    parser.add_argument("--eval-episodes", type=int, default=TrainingConfig.eval_episodes, help="每次评估运行的回合数")
-    parser.add_argument("--save-every", type=int, default=ArtifactConfig.save_every, help="每隔多少步保存 checkpoint")
-    parser.add_argument("--batch-size", type=int, default=TrainingConfig.batch_size, help="每次学习采样的 batch 大小")
-    parser.add_argument("--burnin", type=int, default=TrainingConfig.burnin, help="开始训练前收集的经验数量")
-    parser.add_argument("--replay-capacity", type=int, default=AgentConfig.replay_capacity, help="经验回放容量")
-    parser.add_argument("--learning-rate", type=float, default=AgentConfig.learning_rate, help="学习率")
-    parser.add_argument("--lr-warmup-steps", type=int, default=AgentConfig.lr_warmup_steps, help="学习率 warmup 步数")
-    parser.add_argument("--lr-min-ratio", type=float, default=AgentConfig.lr_min_ratio, help="最小学习率相对初始学习率的比例")
-    parser.add_argument("--gamma", type=float, default=AgentConfig.gamma, help="折扣因子")
-    parser.add_argument("--exploration-decay-steps", type=int, default=AgentConfig.exploration_decay_steps, help="epsilon 线性衰减步数")
-    parser.add_argument("--exploration-min", type=float, default=AgentConfig.exploration_rate_min, help="最小探索率")
-    parser.add_argument("--gradient-clip-norm", type=float, default=AgentConfig.gradient_clip_norm, help="梯度裁剪范数")
-    parser.add_argument("--n-step", type=int, default=AgentConfig.n_step, help="N-step return 步数")
-    parser.add_argument("--noisy-std-init", type=float, default=AgentConfig.noisy_std_init, help="NoisyNet 噪声标准差初始值（设为 0 使用普通 DuelingDQN + epsilon）")
-    parser.add_argument("--no-noisy", action="store_true", help="关闭 NoisyNet，回退到 DuelingDQN + epsilon-greedy")
-    parser.add_argument("--per-alpha", type=float, default=AgentConfig.per_alpha, help="PER 优先级指数")
-    parser.add_argument("--per-beta-start", type=float, default=AgentConfig.per_beta_start, help="PER beta 初始值")
-    parser.add_argument("--per-beta-frames", type=int, default=AgentConfig.per_beta_frames, help="PER beta 退火步数")
-    parser.add_argument("--per-epsilon", type=float, default=AgentConfig.per_epsilon, help="PER priority epsilon")
-    parser.add_argument("--no-reward-clip", action="store_true", help="关闭奖励裁剪")
-    parser.add_argument("--reward-clip-value", type=float, default=EnvConfig.reward_clip_value, help="奖励裁剪绝对值")
-    parser.add_argument("--no-stuck-penalty", action="store_true", help="关闭卡住惩罚与提前截断")
-    parser.add_argument("--stuck-max-steps", type=int, default=EnvConfig.stuck_max_steps, help="连续多少步无位移后判定卡住")
-    parser.add_argument("--stuck-penalty", type=float, default=EnvConfig.stuck_penalty, help="卡住时额外扣除的奖励")
-    parser.add_argument("--no-progress-reward", action="store_true", help="关闭向右移动奖励")
-    parser.add_argument("--progress-reward-scale", type=float, default=EnvConfig.progress_reward_scale, help="每向右移动一像素的额外奖励系数")
-    parser.add_argument("--no-score-reward", action="store_true", help="关闭游戏得分变化奖励")
-    parser.add_argument("--score-reward-scale", type=float, default=EnvConfig.score_reward_scale, help="每增加 1 游戏得分的额外奖励系数")
-    parser.add_argument("--no-flag-reward", action="store_true", help="关闭旗杆通关奖励")
-    parser.add_argument("--flag-reward-value", type=float, default=EnvConfig.flag_reward_value, help="拉旗子的一次性奖励值")
-    parser.add_argument("--normalize-observation", action="store_true", help="在环境层归一化观测（默认保持 uint8）")
+    # ── 环境参数 ──
+    env = parser.add_argument_group("环境设置")
+    env.add_argument("--game", type=str, default=EnvConfig.game, help="游戏名称")
+    env.add_argument("--world", type=int, default=EnvConfig.world, help="世界/大关")
+    env.add_argument("--level", type=int, default=EnvConfig.level, help="关卡")
+    env.add_argument("--version", type=int, default=EnvConfig.version, help="环境版本")
+    env.add_argument("--levels", type=_levels_type, default=None,
+                     help="多关卡，逗号分隔如 1-1,1-2")
+    env.add_argument("--worlds", type=_worlds_type, default=None,
+                     help="多世界，逗号分隔和范围如 1-3,5,7-8")
+    env.add_argument("--movement", choices=("right_only", "simple", "complex"),
+                     default=EnvConfig.movement, help="动作空间预设")
+
+    # ── 训练参数 ──
+    train = parser.add_argument_group("训练设置")
+    train.add_argument("--timesteps", "--total-timesteps", type=int, default=SB3Config.total_timesteps,
+                       dest="total_timesteps", help="总训练步数")
+    train.add_argument("--learning-rate", type=float, default=SB3Config.learning_rate,
+                       help="学习率")
+    train.add_argument("--batch-size", type=int, default=SB3Config.batch_size,
+                       help="batch 大小")
+    train.add_argument("--gamma", type=float, default=SB3Config.gamma,
+                       help="折扣因子")
+    train.add_argument("--buffer-size", type=int, default=SB3Config.buffer_size,
+                       help="经验回放容量")
+    train.add_argument("--learning-starts", type=int, default=SB3Config.learning_starts,
+                       help="开始学习前收集的步数")
+    train.add_argument("--train-freq", type=int, default=SB3Config.train_freq,
+                       help="每隔多少步训练一次")
+    train.add_argument("--target-update-interval", type=int, default=SB3Config.target_update_interval,
+                       help="目标网络更新间隔")
+    train.add_argument("--exploration-fraction", type=float, default=SB3Config.exploration_fraction,
+                       help="epsilon 衰减占总步数的比例")
+    train.add_argument("--exploration-initial-eps", type=float, default=SB3Config.exploration_initial_eps,
+                       help="初始探索率")
+    train.add_argument("--exploration-final-eps", type=float, default=SB3Config.exploration_final_eps,
+                       help="最小探索率")
+    train.add_argument("--max-grad-norm", type=float, default=SB3Config.max_grad_norm,
+                       help="梯度裁剪范数")
+    train.add_argument("--seed", type=int, default=SB3Config.seed, help="随机种子")
+
+    # ── 工件参数 ──
+    art = parser.add_argument_group("保存与恢复")
+    art.add_argument("--save-root", type=Path, default=SB3ArtifactConfig.save_root,
+                     help="checkpoint 根目录")
+    art.add_argument("--flat-save-root", action="store_true",
+                     help="直接使用 checkpoint 根目录，不按兼容参数分子目录")
+    art.add_argument("--run-name", default=None, help="本次训练的名称")
+    art.add_argument("--checkpoint", type=Path, default=None, help="指定要恢复的 checkpoint")
+    art.add_argument("--save-replay-buffer", action="store_true",
+                     help="保存经验回放缓冲区（注意：文件可能很大）")
+    art.add_argument("--num-envs", type=int, default=SB3ArtifactConfig.num_envs,
+                     help="并行环境数量（默认 CPU 核数/2）")
+    art.add_argument("--eval-freq", type=int, default=SB3ArtifactConfig.eval_freq,
+                     help="每隔多少步执行评估")
+    art.add_argument("--eval-episodes", type=int, default=SB3ArtifactConfig.eval_episodes,
+                     help="每次评估的回合数")
+    art.add_argument("--log-interval", type=int, default=SB3ArtifactConfig.log_interval,
+                     help="每隔多少 episode 输出日志")
+
+    # ── 奖励塑形参数 ──
+    rw = parser.add_argument_group("奖励塑形")
+    rw.add_argument("--no-reward-clip", action="store_true", help="关闭奖励裁剪")
+    rw.add_argument("--reward-clip-value", type=float, default=EnvConfig.reward_clip_value,
+                    help="奖励裁剪绝对值")
+    rw.add_argument("--no-stuck-penalty", action="store_true", help="关闭卡住惩罚")
+    rw.add_argument("--stuck-max-steps", type=int, default=EnvConfig.stuck_max_steps,
+                    help="连续多少步无位移后判定卡住")
+    rw.add_argument("--stuck-penalty", type=float, default=EnvConfig.stuck_penalty,
+                    help="卡住时扣除的奖励")
+    rw.add_argument("--no-progress-reward", action="store_true", help="关闭向右移动奖励")
+    rw.add_argument("--progress-reward-scale", type=float, default=EnvConfig.progress_reward_scale,
+                    help="每向右移动一像素的奖励系数")
+    rw.add_argument("--no-score-reward", action="store_true", help="关闭得分变化奖励")
+    rw.add_argument("--score-reward-scale", type=float, default=EnvConfig.score_reward_scale,
+                    help="每增加 1 游戏得分的奖励系数")
+    rw.add_argument("--no-flag-reward", action="store_true", help="关闭旗杆通关奖励")
+    rw.add_argument("--flag-reward-value", type=float, default=EnvConfig.flag_reward_value,
+                    help="旗杆通关奖励值")
 
 
 def add_play_args(parser: argparse.ArgumentParser) -> None:
@@ -350,19 +338,23 @@ def add_play_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--world", type=int, default=EnvConfig.world, help="世界/大关")
     parser.add_argument("--level", type=int, default=EnvConfig.level, help="关卡")
     parser.add_argument("--version", type=int, default=EnvConfig.version, help="环境版本")
-    parser.add_argument(
-        "--movement",
-        choices=("right_only", "simple", "complex"),
-        default=EnvConfig.movement,
-        help="动作空间预设",
-    )
+    parser.add_argument("--levels", type=_levels_type, default=None,
+                        help="多关卡播放，逗号分隔如 1-1,1-2,1-3")
+    parser.add_argument("--worlds", type=_worlds_type, default=None,
+                        help="多世界播放，逗号分隔和范围如 1-3,5,7-8")
+    parser.add_argument("--movement", choices=("right_only", "simple", "complex"),
+                        default=EnvConfig.movement, help="动作空间预设")
     parser.add_argument("--render-mode", default="rgb_array", help="环境渲染模式")
-    parser.add_argument("--save-root", type=Path, default=ArtifactConfig.save_root, help="输出根目录")
-    parser.add_argument("--flat-save-root", action="store_true", help="直接使用输出根目录，不按兼容参数分子目录")
+    parser.add_argument("--save-root", type=Path, default=SB3ArtifactConfig.save_root,
+                        help="输出根目录")
+    parser.add_argument("--flat-save-root", action="store_true",
+                        help="直接使用输出根目录，不按兼容参数分子目录")
 
 
+# ──────────────────────────────────────────────
+# 配置构建函数
+# ──────────────────────────────────────────────
 def _get_level_ids_for_worlds(worlds: list[int]) -> list[str]:
-    """根据世界号列表生成所有关卡 1-4 的 ID 列表（笛卡尔积）。"""
     raw_levels = [str(lv) for lv in range(1, MAX_LEVEL + 1)]
     expanded = []
     for w in worlds:
@@ -377,15 +369,10 @@ def config_from_train_args(args) -> AppConfig:
     if args.worlds:
         worlds = args.worlds
         raw_levels = _get_level_ids_for_worlds(worlds)
-        levels = [
-            _expand_level(lv, game=args.game, version=args.version)
-            for lv in raw_levels
-        ]
+        levels = [_expand_level(lv, game=args.game, version=args.version) for lv in raw_levels]
     elif args.levels:
-        levels = [
-            _expand_level(level, game=args.game, version=args.version)
-            for level in args.levels
-        ]
+        levels = [_expand_level(lv, game=args.game, version=args.version) for lv in args.levels]
+
     env_config = EnvConfig(
         game=args.game,
         world=args.world,
@@ -405,50 +392,48 @@ def config_from_train_args(args) -> AppConfig:
         score_reward_scale=args.score_reward_scale,
         flag_reward_enabled=not args.no_flag_reward,
         flag_reward_value=args.flag_reward_value,
-        normalize_observation=args.normalize_observation,
     )
     save_root = args.save_root if args.flat_save_root else compatible_save_root(args.save_root, env_config)
 
-    return AppConfig(
-        env=env_config,
-        agent=AgentConfig(
-            replay_capacity=args.replay_capacity,
-            gamma=args.gamma,
-            learning_rate=args.learning_rate,
-            lr_warmup_steps=max(1, args.lr_warmup_steps),
-            lr_min_ratio=min(1.0, max(0.0, args.lr_min_ratio)),
-            exploration_decay_steps=args.exploration_decay_steps,
-            exploration_rate_min=args.exploration_min,
-            gradient_clip_norm=args.gradient_clip_norm,
-            n_step=max(1, args.n_step),
-            noisy_std_init=0.0 if args.no_noisy else max(0.0, args.noisy_std_init),
-            per_alpha=args.per_alpha,
-            per_beta_start=args.per_beta_start,
-            per_beta_frames=max(1, args.per_beta_frames),
-            per_epsilon=args.per_epsilon,
-        ),
-        artifacts=ArtifactConfig(
-            save_root=save_root,
-            checkpoint=args.checkpoint,
-            resume=not args.no_resume,
-            keep_runs=args.keep_runs,
-            run_name=args.run_name,
-            save_every=args.save_every,
-        ),
-        training=TrainingConfig(
-            episodes=args.episodes,
-            batch_size=args.batch_size,
-            burnin=args.burnin,
-            record_every=args.record_every,
-            eval_every=args.eval_every,
-            eval_episodes=args.eval_episodes,
-            num_envs=max(1, args.num_envs),
-            vector=args.vector,
-        ),
+    sb3_config = SB3Config(
+        total_timesteps=args.total_timesteps,
+        learning_rate=args.learning_rate,
+        buffer_size=args.buffer_size,
+        learning_starts=args.learning_starts,
+        batch_size=args.batch_size,
+        gamma=args.gamma,
+        train_freq=args.train_freq,
+        target_update_interval=args.target_update_interval,
+        exploration_fraction=args.exploration_fraction,
+        exploration_initial_eps=args.exploration_initial_eps,
+        exploration_final_eps=args.exploration_final_eps,
+        max_grad_norm=args.max_grad_norm,
+        seed=args.seed,
     )
+
+    artifact_config = SB3ArtifactConfig(
+        save_root=save_root,
+        num_envs=max(1, args.num_envs),
+        checkpoint=args.checkpoint,
+        save_replay_buffer=args.save_replay_buffer,
+        eval_freq=args.eval_freq,
+        eval_episodes=args.eval_episodes,
+        log_interval=args.log_interval,
+    )
+
+    return AppConfig(env=env_config, sb3=sb3_config, artifacts=artifact_config)
 
 
 def config_from_play_args(args) -> AppConfig:
+    levels = None
+    worlds = None
+    if args.worlds:
+        worlds = args.worlds
+        raw_levels = _get_level_ids_for_worlds(worlds)
+        levels = [_expand_level(lv, game=args.game, version=args.version) for lv in raw_levels]
+    elif args.levels:
+        levels = [_expand_level(lv, game=args.game, version=args.version) for lv in args.levels]
+
     env_config = EnvConfig(
         game=args.game,
         world=args.world,
@@ -456,6 +441,8 @@ def config_from_play_args(args) -> AppConfig:
         version=args.version,
         render_mode=args.render_mode,
         movement=args.movement,
+        levels=levels,
+        worlds=worlds,
         clip_rewards=False,
         stuck_penalty_enabled=False,
         progress_reward_enabled=False,
@@ -464,11 +451,12 @@ def config_from_play_args(args) -> AppConfig:
     )
     save_root = args.save_root if args.flat_save_root else compatible_save_root(args.save_root, env_config)
 
-    checkpoint = args.checkpoint or save_root / "latest.chkpt"
+    checkpoint = args.checkpoint or resolve_checkpoint(
+        SB3ArtifactConfig(save_root=save_root, resume=True)
+    )
 
     return AppConfig(
         env=env_config,
-        agent=AgentConfig(exploration_rate=0.0, exploration_rate_min=0.0),
-        artifacts=ArtifactConfig(save_root=save_root, checkpoint=checkpoint, resume=True),
-        training=TrainingConfig(episodes=args.episodes),
+        sb3=SB3Config(),
+        artifacts=SB3ArtifactConfig(save_root=save_root, checkpoint=checkpoint, resume=True),
     )

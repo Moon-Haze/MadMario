@@ -1,14 +1,17 @@
 import os
 
 os.environ["KMP_DUPLICATE_LIB_OK"] = "True"
+# 限制 BLAS 线程数防止多进程环境下的线程爆炸（每个子进程 × 自动线程数 >= ULIMIT）
+os.environ.setdefault("OMP_NUM_THREADS", "1")
+os.environ.setdefault("OPENBLAS_NUM_THREADS", "1")
+os.environ.setdefault("MKL_NUM_THREADS", "1")
+os.environ.setdefault("VECLIB_MAXIMUM_THREADS", "1")
 
 import matplotlib.pyplot as plt
+from stable_baselines3 import DQN
 
-from mad_mario.agent.checkpoint import CheckpointManager
-from mad_mario.agent.mario import Mario
 from mad_mario.config import build_parser, config_from_play_args, config_from_train_args
 from mad_mario.env.factory import make_mario_env
-from mad_mario.training.artifacts import create_artifacts
 from mad_mario.training.trainer import train
 
 
@@ -25,64 +28,79 @@ def main():
 
 
 def play(config):
-    env = make_mario_env(config.env)
-    artifacts = create_artifacts(config.artifacts)
-    agent = Mario(
-        state_dim=config.env.state_dim,
-        action_dim=env.action_space.n,
-        agent_config=config.agent,
-        training_config=config.training,
-    )
-    CheckpointManager(config.artifacts, artifacts).load(agent, config.artifacts.checkpoint)
-    agent.exploration_rate = 0.0
-    agent.exploration_rate_min = 0.0
+    """使用训练好的 SB3 DQN 模型播放游戏。"""
+    checkpoint_path = config.artifacts.checkpoint
+    if checkpoint_path is None or not checkpoint_path.exists():
+        print(f"错误：checkpoint 不存在（{checkpoint_path}）")
+        return
 
-    plt.ion()
-    fig, ax = plt.subplots()
+    levels = config.env.levels or [None]
+    model = None
+    fig = None
     image = None
-    ax.axis("off")
-    fig.canvas.manager.set_window_title("训练好的 Mario")
+    ax = None
 
-    window_open = True
+    for level_idx, level_name in enumerate(levels, start=1):
+        env = make_mario_env(config.env, level_name=level_name)
 
-    def on_close(_event):
-        nonlocal window_open
-        window_open = False
+        # 首次加载模型
+        if model is None:
+            print(f"正在加载 checkpoint: {checkpoint_path}")
+            model = DQN.load(str(checkpoint_path), device="auto")
+            print(f"模型已加载。已训练步数: {model.num_timesteps}")
 
-    fig.canvas.mpl_connect("close_event", on_close)
+            plt.ion()
+            fig, ax = plt.subplots()
+            ax.axis("off")
+            fig.canvas.manager.set_window_title("训练好的 Mario (SB3 DQN)")  # type: ignore[union-attr]
 
-    try:
-        if window_open:
+        level_label = level_name or f"世界{config.env.world}-{config.env.level}"
+        print(f"\n=== 播放关卡 {level_label}（{level_idx}/{len(levels)}）===")
+
+        try:
             state, _ = env.reset()
             total_reward = 0.0
             step = 0
             flag_get = False
 
             while True:
-                if not window_open:
+                if not plt.get_fignums():
                     break
+
+                # 渲染
                 frame = env.render()
                 if image is None:
-                    image = ax.imshow(frame)
+                    image = ax.imshow(frame)  # type: ignore[union-attr]
                 else:
                     image.set_data(frame)
-                fig.canvas.draw_idle()
-                fig.canvas.flush_events()
+                fig.canvas.draw_idle()  # type: ignore[union-attr]
+                fig.canvas.flush_events()  # type: ignore[union-attr]
                 plt.pause(0.001)
 
-                action = agent.act_eval(state)
-                state, reward, terminated, truncated, info = env.step(action)
+                # 贪心动作
+                action, _ = model.predict(state, deterministic=True)
+                state, reward, terminated, truncated, info = env.step(int(action))
                 done = terminated or truncated
 
-                total_reward += reward
+                total_reward += float(reward)
                 step += 1
 
                 if done or info.get("flag_get"):
                     flag_get = bool(info.get("flag_get", False))
-                    print(f"步数={step}，奖励={total_reward:.1f}，是否通关={flag_get}")
+                    print(
+                        f"关卡 {level_label}：步数={step}，奖励={total_reward:.1f}，通关={flag_get}"
+                    )
                     break
-    finally:
-        env.close()
+
+            if not plt.get_fignums():
+                break
+
+        finally:
+            env.close()
+
+    if fig is not None:
+        plt.ioff()
+        plt.close(fig)
 
 
 if __name__ == "__main__":

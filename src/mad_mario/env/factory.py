@@ -3,11 +3,11 @@ from functools import partial
 import gym_super_mario_bros
 from gym_super_mario_bros.actions import COMPLEX_MOVEMENT, RIGHT_ONLY, SIMPLE_MOVEMENT
 from gymnasium.vector import AsyncVectorEnv
-from gymnasium.wrappers import FrameStackObservation as FrameStack, GrayscaleObservation as GrayScaleObservation
+from gymnasium.wrappers import ClipReward, FrameStackObservation as FrameStack, GrayscaleObservation as GrayScaleObservation, RepeatAction, ResizeObservation
 from nes_py.wrappers import JoypadSpace
 
 from mad_mario.config import EnvConfig, build_env_name
-from mad_mario.env.wrappers import ClipReward, FlagReward, NormalizeObservation, ProgressReward, ResizeObservation, ScoreReward, SkipFrame, StuckPenalty
+from mad_mario.env.wrappers import FlagReward, ProgressReward, ScoreReward, StuckPenalty
 
 
 MOVEMENT_ACTIONS = {
@@ -32,9 +32,9 @@ def make_mario_env(config: EnvConfig | None = None, render_mode=None, level_name
         choices = ", ".join(MOVEMENT_ACTIONS)
         raise ValueError(f"未知动作空间预设: {config.movement}，可选值: {choices}") from exc
     env = JoypadSpace(env, movement_actions)
-    env = SkipFrame(env, skip=config.frame_skip)
+    env = RepeatAction(env, num_repeats=config.frame_skip)
     if config.clip_rewards:
-        env = ClipReward(env, clip_value=config.reward_clip_value)
+        env = ClipReward(env, min_reward=-config.reward_clip_value, max_reward=config.reward_clip_value)
     if config.progress_reward_enabled:
         env = ProgressReward(env, scale=config.progress_reward_scale)
     if config.score_reward_enabled:
@@ -48,9 +48,7 @@ def make_mario_env(config: EnvConfig | None = None, render_mode=None, level_name
             penalty=config.stuck_penalty,
         )
     env = GrayScaleObservation(env, keep_dim=False)
-    env = ResizeObservation(env, shape=config.resize_shape)
-    if config.normalize_observation:
-        env = NormalizeObservation(env)
+    env = ResizeObservation(env, shape=(config.resize_shape, config.resize_shape))
     env = FrameStack(env, stack_size=config.frame_stack)
     return env
 
