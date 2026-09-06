@@ -1,3 +1,4 @@
+import logging
 import os
 
 os.environ["KMP_DUPLICATE_LIB_OK"] = "True"
@@ -19,7 +20,10 @@ from mad_mario.config import (
     load_config_file,
 )
 from mad_mario.env.factory import make_mario_env
+from mad_mario.logging.setup import setup_logging
 from mad_mario.training.trainer import train
+
+logger = logging.getLogger(__name__)
 
 
 def main():
@@ -40,8 +44,12 @@ def main():
     args = parser.parse_args()
 
     if args.command == "train":
-        train(config_from_train_args(args))
+        config = config_from_train_args(args)
+        log_level = getattr(logging, args.log_level.upper(), logging.INFO)
+        log_path = setup_logging(level=log_level, log_dir=config.artifacts.save_root / "logs")
+        train(config, log_path=log_path)
     elif args.command == "play":
+        setup_logging()
         play(config_from_play_args(args))
     else:
         parser.error(f"未知命令: {args.command}")
@@ -51,7 +59,7 @@ def play(config):
     """使用训练好的 SB3 DQN 模型播放游戏。"""
     checkpoint_path = config.artifacts.checkpoint
     if checkpoint_path is None or not checkpoint_path.exists():
-        print(f"错误：checkpoint 不存在（{checkpoint_path}）")
+        logger.error(f"错误：checkpoint 不存在（{checkpoint_path}）")
         return
 
     levels = config.env.levels or [None]
@@ -65,9 +73,9 @@ def play(config):
 
         # 首次加载模型
         if model is None:
-            print(f"正在加载 checkpoint: {checkpoint_path}")
+            logger.info(f"正在加载 checkpoint: {checkpoint_path}")
             model = DQN.load(str(checkpoint_path), device="auto")
-            print(f"模型已加载。已训练步数: {model.num_timesteps}")
+            logger.info(f"模型已加载。已训练步数: {model.num_timesteps}")
 
             plt.ion()
             fig, ax = plt.subplots()
@@ -75,7 +83,7 @@ def play(config):
             fig.canvas.manager.set_window_title("训练好的 Mario (SB3 DQN)")  # type: ignore[union-attr]
 
         level_label = level_name or f"世界{config.env.world}-{config.env.level}"
-        print(f"\n=== 播放关卡 {level_label}（{level_idx}/{len(levels)}）===")
+        logger.info("=== 播放关卡 %s（%d/%d）===", level_label, level_idx, len(levels))
 
         try:
             state, _ = env.reset()
@@ -107,8 +115,9 @@ def play(config):
 
                 if done or info.get("flag_get"):
                     flag_get = bool(info.get("flag_get", False))
-                    print(
-                        f"关卡 {level_label}：步数={step}，奖励={total_reward:.1f}，通关={flag_get}"
+                    logger.info(
+                        "关卡 %s：步数=%d，奖励=%.1f，通关=%s",
+                        level_label, step, total_reward, flag_get,
                     )
                     break
 
