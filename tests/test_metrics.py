@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import csv
+import logging
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -82,3 +84,20 @@ class TestCsvHeader:
         assert len(rows) == 2  # 表头 + 数据行
         assert rows[1][0] == "1"
         assert rows[1][3] == "50.0"
+
+
+class TestRecordLogging:
+    def test_record_emits_text_via_logging(self, tmp_path: Path, caplog):
+        callback = MarioMetricsCallback(save_dir=tmp_path, log_interval=20)
+        callback.csv_path = tmp_path / "latest_metrics.csv"
+        callback._ensure_csv_header()
+        callback._write_plots = lambda: None  # 避免真实绘图
+        callback.model = SimpleNamespace(exploration_rate=0.5)
+        callback.num_timesteps = 1000
+        callback.episode_count = 20
+        callback.ep_rewards = [10.0, 20.0]
+        with caplog.at_level(logging.INFO, logger="mad_mario.logging.metrics"):
+            callback._record()
+        assert "回合=20" in caplog.text
+        assert "平均奖励=" in caplog.text
+        assert "平均最大 x=" in caplog.text

@@ -1,4 +1,5 @@
 import csv
+import logging
 import time
 from collections import deque
 from pathlib import Path
@@ -7,7 +8,8 @@ import matplotlib
 import matplotlib.pyplot as plt
 import numpy as np
 from stable_baselines3.common.callbacks import BaseCallback
-from tqdm import tqdm
+
+logger = logging.getLogger(__name__)
 
 
 METRIC_DECIMALS = 3
@@ -173,16 +175,11 @@ class MarioMetricsCallback(BaseCallback):
         ]
         self._append_csv(row)
 
-        tqdm.write(
-            f"回合={self.episode_count} | "
-            f"步数={self.num_timesteps} | "
-            f"探索率={eps:.{EPSILON_DECIMALS}f} | "
-            f"平均奖励={mean_rew:.3f} | "
-            f"平均长度={mean_len:.3f} | "
-            f"平均损失={mean_loss:.3f} | "
-            f"平均 Q 值={mean_q:.3f} | "
-            f"平均最大 x={mean_max_x:.3f} | "
-            f"时间间隔={delta:.3f}"
+        logger.info(
+            "回合=%s | 步数=%s | 探索率=%.4f | 平均奖励=%.3f | 平均长度=%.3f | "
+            "平均损失=%.3f | 平均 Q 值=%.3f | 平均最大 x=%.3f | 时间间隔=%.3f",
+            self.episode_count, self.num_timesteps, eps,
+            mean_rew, mean_len, mean_loss, mean_q, mean_max_x, delta,
         )
 
         self._write_plots()
@@ -379,17 +376,13 @@ class MetricLogger:
         if not emit:
             return
 
-        tqdm.write(
-            f"回合={episode} | 步数={step} | "
-            f"探索率={round(epsilon, EPSILON_DECIMALS):.{EPSILON_DECIMALS}f} | "
-            f"平均奖励={mean_ep_reward:.3f} | "
-            f"平均长度={mean_ep_length:.3f} | "
-            f"平均损失={mean_ep_loss:.3f} | "
-            f"平均 Q 值={mean_ep_q:.3f} | "
-            f"平均最大 x={mean_max_x_pos:.3f} | "
-            f"平均 NOOP={mean_noop_rate:.3f} | "
-            f"常用动作={int(mean_most_used_action):d} | "
-            f"时间间隔={delta:.3f}"
+        logger.info(
+            "回合=%s | 步数=%s | 探索率=%.4f | 平均奖励=%.3f | 平均长度=%.3f | "
+            "平均损失=%.3f | 平均 Q 值=%.3f | 平均最大 x=%.3f | "
+            "平均 NOOP=%.3f | 常用动作=%d | 时间间隔=%.3f",
+            episode, step, epsilon,
+            mean_ep_reward, mean_ep_length, mean_ep_loss, mean_ep_q,
+            mean_max_x_pos, mean_noop_rate, int(mean_most_used_action), delta,
         )
 
         for plot_paths in self.plot_path_groups:
