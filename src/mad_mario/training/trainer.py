@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 import random
 from pathlib import Path
 from typing import Any
@@ -9,11 +10,13 @@ from stable_baselines3 import DQN
 from stable_baselines3.common.callbacks import CallbackList, CheckpointCallback, EvalCallback
 from stable_baselines3.common.monitor import Monitor
 from stable_baselines3.common.vec_env import SubprocVecEnv
-from tqdm import tqdm
 
 from mad_mario.config import AppConfig, compatible_save_root, resolve_checkpoint
 from mad_mario.env.factory import make_mario_env
 from mad_mario.logging.metrics import MarioMetricsCallback
+from mad_mario.logging.setup import capture_stdout_to
+
+logger = logging.getLogger(__name__)
 
 
 def _make_env_thunks(config: AppConfig) -> list[callable]:
@@ -37,7 +40,7 @@ def _env_thunk(env_config, level_name: str | None = None):
     return lambda: make_mario_env(config=env_config, level_name=level_name)
 
 
-def train(config: AppConfig) -> None:
+def train(config: AppConfig, log_path: Path | None = None) -> None:
     """使用 Stable-Baselines3 DQN 训练 Mario 智能体。
 
     - 创建或加载 DQN 模型
@@ -45,12 +48,17 @@ def train(config: AppConfig) -> None:
     - 每 ``log_interval`` 回合输出日志并刷新图表
     - 每 ``eval_freq`` 步执行一次评估
     - 支持 ``Ctrl+C`` 安全中断后恢复
+
+    Args:
+        config: 顶层配置。
+        log_path: 非空时把训练期间写往 stdout 的文本（SB3 回调输出）
+            镜像到该日志文件；默认 ``None``（不镜像）。
     """
     save_root = config.artifacts.save_root
     save_root.mkdir(parents=True, exist_ok=True)
 
     # ── 1. 创建并行环境 ──
-    tqdm.write(f"创建 {config.artifacts.num_envs} 个并行环境...")
+    logger.info("创建 %s 个并行环境...", config.artifacts.num_envs)
     env_fns = _make_env_thunks(config)
     env = SubprocVecEnv(env_fns)
 
@@ -88,14 +96,14 @@ def train(config: AppConfig) -> None:
         ckpt_path = resolve_checkpoint(config.artifacts)
         if ckpt_path is not None and ckpt_path.exists():
             try:
-                tqdm.write(f"正在恢复 checkpoint: {ckpt_path}")
+                logger.info("正在恢复 checkpoint: %s", ckpt_path)
                 model = DQN.load(ckpt_path, env=env, device="auto")
                 loaded = True
             except Exception as exc:
-                tqdm.write(f"checkpoint 加载失败，将从头开始训练。原因: {exc}")
+                logger.warning("checkpoint 加载失败，将从头开始训练。原因: %s", exc)
 
     if model is None:
-        tqdm.write("从头开始创建 DQN 模型...")
+        logger.info("从头开始创建 DQN 模型...")
         model = DQN(**dqn_params)
 
     # ── 4. 回调 ──
@@ -130,26 +138,29 @@ def train(config: AppConfig) -> None:
 
     callbacks = CallbackList([checkpoint_callback, eval_callback, metrics_callback])
 
-    # ── 5. 训练 ──
-    tqdm.write(
-        f"开始训练（总步数={config.sb3.total_timesteps}, "
-        f"并行数={config.artifacts.num_envs}, "
-        f"保存间隔={config.artifacts.save_freq} 步）"
+    # ── 5. 训练（镜像 SB3 文本到 log_path）──
+    logger.info(
+        "开始训练（总步数=%s, 并行数=%s, 保存间隔=%s 步）",
+        config.sb3.total_timesteps,
+        config.artifacts.num_envs,
+        config.artifacts.save_freq,
     )
     try:
-        model.learn(
-            total_timesteps=config.sb3.total_timesteps,
-            callback=callbacks,
-            reset_num_timesteps=not loaded,
-            log_interval=1,  # SB3 内部日志频率（每 N 步），和我们的回调独立
-        )
-    except KeyboardInterrupt:
-        tqdm.write("\n检测到键盘中断，正在保存最终 checkpoint...")
+        with capture_stdout_to(log_path):
+            try:
+                model.learn(
+                    total_timesteps=config.sb3.total_timesteps,
+                    callback=callbacks,
+                    reset_num_timesteps=not loaded,
+                    log_interval=1,  # SB3 内部日志频率（每 N 步），和我们的回调独立
+                )
+            except KeyboardInterrupt:
+                logger.info("检测到键盘中断，正在保存最终 checkpoint...")
 
-    # ── 6. 保存 ──
-    final_path = str(save_root / "mario_dqn_final.zip")
-    model.save(final_path)
-    tqdm.write(f"最终模型已保存到 {final_path}")
-
-    env.close()
-    tqdm.write("训练完成。")
+            # ── 6. 保存 ──
+            final_path = str(save_root / "mario_dqn_final.zip")
+            model.save(final_path)
+            logger.info("最终模型已保存到 %s", final_path)
+    finally:
+        env.close()
+        logger.info("训练完成。")

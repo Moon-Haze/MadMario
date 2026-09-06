@@ -100,3 +100,12 @@ class TestCaptureStdoutTo:
         with capture_stdout_to(tmp_path / "out.log"):
             assert sys.stdout is not original
         assert sys.stdout is original
+
+
+class TestTrainerMigration:
+    def test_trainer_off_tqdm_and_wired_for_capture(self):
+        repo = Path(__file__).resolve().parents[1]
+        src = (repo / "src" / "mad_mario" / "training" / "trainer.py").read_text(encoding="utf-8")
+        assert "tqdm" not in src
+        assert "capture_stdout_to" in src
+        assert "log_path: Path | None = None" in src
