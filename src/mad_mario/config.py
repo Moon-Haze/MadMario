@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import argparse
+import json
 import os
+import sys
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -239,10 +241,82 @@ def resolve_checkpoint(config: SB3ArtifactConfig) -> Path | None:
 
 
 # ──────────────────────────────────────────────
+# 配置文件加载
+# ──────────────────────────────────────────────
+
+
+def _flatten_config(raw: dict) -> dict:
+    """将嵌套分组配置展平为扁平字典。
+
+    支持两种格式：
+        {"world": 1, "learning_rate": 0.001}          # 扁平
+        {"env": {"world": 1}, "train": {"lr": ...}}  # 分组
+    """
+    flat = {}
+    for key, value in raw.items():
+        if isinstance(value, dict):
+            flat.update(value)
+        else:
+            flat[key] = value
+    return flat
+
+
+def load_config_file(path: str) -> dict:
+    """加载 JSON 配置文件并返回扁平化配置字典。
+
+    Args:
+        path: 配置文件路径（.json）。
+
+    Returns:
+        展平后的配置字典，key 对应 argparse dest 名称。
+
+    Raises:
+        SystemExit: 文件不存在或 JSON 解析失败时退出。
+    """
+    try:
+        with open(path, encoding="utf-8") as f:
+            raw = json.load(f)
+    except FileNotFoundError:
+        raise SystemExit(f"错误：配置文件不存在: {path}")
+    except json.JSONDecodeError as e:
+        raise SystemExit(f"错误：配置文件 JSON 解析失败: {e}")
+
+    if not isinstance(raw, dict):
+        raise SystemExit("错误：配置文件必须是一个 JSON 对象")
+
+    return _flatten_config(raw)
+
+
+def _extract_config_path() -> str | None:
+    """从 ``sys.argv`` 中提取 ``--config`` 路径，不触发完整解析。"""
+    for i, arg in enumerate(sys.argv):
+        if arg == "--config" and i + 1 < len(sys.argv):
+            return sys.argv[i + 1]
+        if arg.startswith("--config="):
+            return arg.split("=", 1)[1]
+    return None
+
+
+def _apply_config_defaults(parser: argparse.ArgumentParser, config: dict) -> None:
+    """将配置项作为默认值应用到所有子解析器。
+
+    这样 argparse 解析时，CLI 参数自然覆盖 config 中的对应值。
+    """
+    for action in parser._actions:
+        if isinstance(action, argparse._SubParsersAction):  # type: ignore[attr-defined]
+            for subparser in action.choices.values():
+                subparser.set_defaults(**config)
+
+
+# ──────────────────────────────────────────────
 # CLI 解析器
 # ──────────────────────────────────────────────
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="训练或播放 Super Mario DQN 智能体（基于 Stable-Baselines3）")
+    parser.add_argument(
+        "--config", type=str, default=None,
+        help="JSON 配置文件路径。命令行中显式设置的参数会覆盖配置文件中的对应值。",
+    )
     subparsers = parser.add_subparsers(dest="command", required=True)
     add_train_args(subparsers.add_parser("train", help="训练 Mario 智能体"))
     add_play_args(subparsers.add_parser("play", help="播放训练好的 Mario 智能体"))

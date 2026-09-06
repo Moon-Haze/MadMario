@@ -10,13 +10,33 @@ os.environ.setdefault("VECLIB_MAXIMUM_THREADS", "1")
 import matplotlib.pyplot as plt
 from stable_baselines3 import DQN
 
-from mad_mario.config import build_parser, config_from_play_args, config_from_train_args
+from mad_mario.config import (
+    _apply_config_defaults,
+    _extract_config_path,
+    build_parser,
+    config_from_play_args,
+    config_from_train_args,
+    load_config_file,
+)
 from mad_mario.env.factory import make_mario_env
 from mad_mario.training.trainer import train
 
 
 def main():
+    # 1. 提前扫描 --config（不经过 argparse，因为需要在解析前获得配置）
+    config_path = _extract_config_path()
+    config = {}
+    if config_path:
+        config = load_config_file(config_path)
+
+    # 2. 构建解析器
     parser = build_parser()
+
+    # 3. 将配置项作为默认值注入所有子解析器
+    if config:
+        _apply_config_defaults(parser, config)
+
+    # 4. 正常解析——CLI 参数自然覆盖 config 中的对应值
     args = parser.parse_args()
 
     if args.command == "train":

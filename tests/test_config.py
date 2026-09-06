@@ -194,9 +194,12 @@ class TestConfigFromTrainArgs:
     def test_minimal(self):
         parser = argparse.ArgumentParser()
         add_train_args(parser)
-        args = parser.parse_args([
-            "--timesteps", "1000",
-        ])
+        args = parser.parse_args(
+            [
+                "--timesteps",
+                "1000",
+            ]
+        )
         config = config_from_train_args(args)
         assert config.sb3.total_timesteps == 1000
         assert config.env.world == 1
@@ -205,9 +208,12 @@ class TestConfigFromTrainArgs:
     def test_with_worlds(self):
         parser = argparse.ArgumentParser()
         add_train_args(parser)
-        args = parser.parse_args([
-            "--worlds", "1-3",
-        ])
+        args = parser.parse_args(
+            [
+                "--worlds",
+                "1-3",
+            ]
+        )
         config = config_from_train_args(args)
         assert config.env.worlds == [1, 2, 3]
         assert "1-1" in config.env.levels[0]
@@ -216,10 +222,14 @@ class TestConfigFromTrainArgs:
     def test_with_levels(self):
         parser = argparse.ArgumentParser()
         add_train_args(parser)
-        args = parser.parse_args([
-            "--levels", "1-1,2-1",
-            "--movement", "simple",
-        ])
+        args = parser.parse_args(
+            [
+                "--levels",
+                "1-1,2-1",
+                "--movement",
+                "simple",
+            ]
+        )
         config = config_from_train_args(args)
         assert len(config.env.levels) == 2
         assert "1-1" in config.env.levels[0]
@@ -227,11 +237,13 @@ class TestConfigFromTrainArgs:
     def test_reward_flags(self):
         parser = argparse.ArgumentParser()
         add_train_args(parser)
-        args = parser.parse_args([
-            "--no-progress-reward",
-            "--no-score-reward",
-            "--no-flag-reward",
-        ])
+        args = parser.parse_args(
+            [
+                "--no-progress-reward",
+                "--no-score-reward",
+                "--no-flag-reward",
+            ]
+        )
         config = config_from_train_args(args)
         assert config.env.progress_reward_enabled is False
         assert config.env.score_reward_enabled is False
@@ -240,11 +252,16 @@ class TestConfigFromTrainArgs:
     def test_sb3_params(self):
         parser = argparse.ArgumentParser()
         add_train_args(parser)
-        args = parser.parse_args([
-            "--learning-rate", "0.001",
-            "--batch-size", "64",
-            "--gamma", "0.95",
-        ])
+        args = parser.parse_args(
+            [
+                "--learning-rate",
+                "0.001",
+                "--batch-size",
+                "64",
+                "--gamma",
+                "0.95",
+            ]
+        )
         config = config_from_train_args(args)
         assert config.sb3.learning_rate == 0.001
         assert config.sb3.batch_size == 64
@@ -281,8 +298,8 @@ class TestConfigFromPlayArgs:
 class TestBuildParser:
     def test_has_subcommands(self):
         parser = build_parser()
-        assert "train" in parser._subparsers._group_actions[0].choices
-        assert "play" in parser._subparsers._group_actions[0].choices
+        assert "train" in parser._subparsers._group_actions[0].choices  # type: ignore[union-attr]
+        assert "play" in parser._subparsers._group_actions[0].choices  # type: ignore[union-attr]
 
     def test_train_help(self):
         parser = build_parser()
