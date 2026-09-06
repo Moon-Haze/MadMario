@@ -71,6 +71,7 @@ class SB3ArtifactConfig:
     checkpoint: Path | None = None
     resume: bool = True
     run_name: str | None = None
+    log_level: str = "info"            # logging 级别：debug/info/warning/error
     save_freq: int = 100_000          # 每隔多少步保存一次 checkpoint
     save_replay_buffer: bool = False  # 保存经验回放缓冲区（文件很大）
     eval_freq: int = 10_000           # 每隔多少步执行一次评估
@@ -383,6 +384,9 @@ def add_train_args(parser: argparse.ArgumentParser) -> None:
                      help="每次评估的回合数")
     art.add_argument("--log-interval", type=int, default=SB3ArtifactConfig.log_interval,
                      help="每隔多少 episode 输出日志")
+    art.add_argument("--log-level", choices=("debug", "info", "warning", "error"),
+                     default=SB3ArtifactConfig.log_level,
+                     help="日志级别（默认 info）")
 
     # ── 奖励塑形参数 ──
     rw = parser.add_argument_group("奖励塑形")
@@ -493,6 +497,7 @@ def config_from_train_args(args) -> AppConfig:
         eval_freq=args.eval_freq,
         eval_episodes=args.eval_episodes,
         log_interval=args.log_interval,
+        log_level=args.log_level,
     )
 
     return AppConfig(env=env_config, sb3=sb3_config, artifacts=artifact_config)

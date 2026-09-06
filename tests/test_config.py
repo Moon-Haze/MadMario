@@ -267,6 +267,20 @@ class TestConfigFromTrainArgs:
         assert config.sb3.batch_size == 64
         assert config.sb3.gamma == 0.95
 
+    def test_log_level_default(self):
+        parser = argparse.ArgumentParser()
+        add_train_args(parser)
+        args = parser.parse_args([])
+        config = config_from_train_args(args)
+        assert config.artifacts.log_level == "info"
+
+    def test_log_level_custom(self):
+        parser = argparse.ArgumentParser()
+        add_train_args(parser)
+        args = parser.parse_args(["--log-level", "debug"])
+        config = config_from_train_args(args)
+        assert config.artifacts.log_level == "debug"
+
 
 # ─────────────────────────────
 # config_from_play_args
