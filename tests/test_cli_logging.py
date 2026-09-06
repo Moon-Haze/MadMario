@@ -6,13 +6,13 @@ import logging
 from types import SimpleNamespace
 
 
-def fake_setup_logging_factory():
+def fake_setup_logging_factory(log_path=None):
     def _make(calls):
         def fake_setup_logging(level=logging.INFO, log_dir=None, prefix="train"):
             calls["level"] = level
             calls["log_dir"] = log_dir
             calls["prefix"] = prefix
-            return None
+            return log_path
         return fake_setup_logging
     return _make
 
@@ -27,7 +27,7 @@ class TestMainTrainWiring:
 
         monkeypatch.setattr(cli_mod, "config_from_train_args", lambda args: fake_config)
         calls: dict = {}
-        monkeypatch.setattr(cli_mod, "setup_logging", fake_setup_logging_factory()(calls))
+        monkeypatch.setattr(cli_mod, "setup_logging", fake_setup_logging_factory(fake_log_path)(calls))
         train_calls: dict = {}
 
         def fake_train(config, log_path=None):
@@ -42,7 +42,7 @@ class TestMainTrainWiring:
         assert calls["log_dir"] == fake_save_root / "logs"
         assert calls["level"] == logging.DEBUG
         assert train_calls["config"] is fake_config
-        assert train_calls["log_path"] is None  # fake_setup_logging 返回 None
+        assert train_calls["log_path"] is fake_log_path  # setup_logging 返回值被透传给 train
 
 
 class TestMainPlayWiring:

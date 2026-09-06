@@ -161,6 +161,6 @@ def train(config: AppConfig, log_path: Path | None = None) -> None:
             final_path = str(save_root / "mario_dqn_final.zip")
             model.save(final_path)
             logger.info("最终模型已保存到 %s", final_path)
+            logger.info("训练完成。")
     finally:
         env.close()
-        logger.info("训练完成。")

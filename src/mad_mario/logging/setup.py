@@ -90,9 +90,15 @@ class StdoutTee:
         return len(text)
 
     def flush(self) -> None:
-        self._real.flush()
+        try:
+            self._real.flush()
+        except OSError:
+            pass
         if self._file_ok:
-            self._file.flush()
+            try:
+                self._file.flush()
+            except OSError:
+                self._file_ok = False
 
     def close(self) -> None:
         try:
