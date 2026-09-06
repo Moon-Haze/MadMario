@@ -4,12 +4,13 @@ from __future__ import annotations
 
 import logging
 import re
+import sys
 from datetime import datetime
 from pathlib import Path
 
 import pytest
 
-from mad_mario.logging.setup import make_log_file_name, setup_logging
+from mad_mario.logging.setup import capture_stdout_to, make_log_file_name, setup_logging
 
 LOG_NAME_RE = re.compile(r"train_\d{8}_\d{6}\.log")
 
@@ -75,3 +76,27 @@ class TestSetupLogging:
         err = capsys.readouterr().err
         assert "这条 WARNING 应落盘" in err
         assert "这条 INFO 不应落盘" not in err
+
+
+class TestCaptureStdoutTo:
+    def test_mirrors_to_file_and_real_stdout(self, tmp_path: Path, capsys):
+        log_path = tmp_path / "out.log"
+        with capture_stdout_to(log_path):
+            print("来自 stdout 的一行")
+        out = capsys.readouterr().out
+        assert "来自 stdout 的一行" in out
+        assert log_path.read_text(encoding="utf-8") == "来自 stdout 的一行\n"
+
+    def test_none_is_noop(self, tmp_path: Path):
+        original = sys.stdout
+        with capture_stdout_to(None):
+            assert sys.stdout is original
+            print("普通输出")
+        assert sys.stdout is original
+        assert list(tmp_path.glob("*.log")) == []
+
+    def test_restores_stdout(self, tmp_path: Path):
+        original = sys.stdout
+        with capture_stdout_to(tmp_path / "out.log"):
+            assert sys.stdout is not original
+        assert sys.stdout is original
