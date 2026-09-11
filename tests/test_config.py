@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import os
 from pathlib import Path
 
 import pytest
@@ -185,6 +186,38 @@ class TestResolveCheckpoint:
         final.touch()
         cfg = SB3ArtifactConfig(save_root=tmp_path, resume=True)
         assert resolve_checkpoint(cfg) == final
+
+    def test_snapshots_subdir_discovered(self, tmp_path: Path):
+        # 周期档存在 save_root/snapshots/ 子目录时也应被自动发现（此前漏扫会返回 None）
+        snap = tmp_path / "snapshots"
+        snap.mkdir()
+        ckpt = snap / "mario_dqn_199968_steps.zip"
+        ckpt.touch()
+        cfg = SB3ArtifactConfig(save_root=tmp_path, resume=True)
+        assert resolve_checkpoint(cfg) == ckpt
+
+    def test_steps_chosen_over_final(self, tmp_path: Path):
+        # 只要存在周期档就优先于 final.zip；final.zip 仅在无周期档时兜底
+        snap = tmp_path / "snapshots"
+        snap.mkdir()
+        ckpt = snap / "mario_dqn_299952_steps.zip"
+        ckpt.touch()
+        final = tmp_path / "mario_dqn_final.zip"
+        final.touch()
+        cfg = SB3ArtifactConfig(save_root=tmp_path, resume=True)
+        assert resolve_checkpoint(cfg) == ckpt
+
+    def test_largest_steps_wins_across_dirs(self, tmp_path: Path):
+        # 顶层与 snapshots/ 并存时按训练步数取最大，而非按修改时间取最新
+        old_big = tmp_path / "mario_dqn_399936_steps.zip"
+        old_big.touch()
+        os.utime(old_big, (946684800, 946684800))  # mtime 设为 2000-01-01，故意更旧
+        snap = tmp_path / "snapshots"
+        snap.mkdir()
+        new_small = snap / "mario_dqn_299952_steps.zip"
+        new_small.touch()
+        cfg = SB3ArtifactConfig(save_root=tmp_path, resume=True)
+        assert resolve_checkpoint(cfg) == old_big
 
 
 # ─────────────────────────────
