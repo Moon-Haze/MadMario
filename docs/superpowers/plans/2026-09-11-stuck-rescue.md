@@ -217,7 +217,28 @@ from mad_mario.env.wrappers import FlagReward, ProgressReward, ScoreReward, Stuc
 
 2. 把 `class TestStuckPenalty:` 改名为 `class TestStuckHandler:`，并把该类内所有 `StuckPenalty(` 替换为 `StuckHandler(`。
 
-3. 把该类内的 4 个既有测试整体替换为下面 10 个（`ProgressReward` / `ScoreReward` / `FlagReward` 三个测试类保持不动）：
+3. 在模块级 `_BaseMockEnv` 类定义之后、`TestStuckHandler` 之前，插入两个**共享** mock 环境。多个测试需要同一种"静止/可推进"环境，共享定义可避免同一段 mock 代码重复五份：
+
+```python
+class _StillEnv(_BaseMockEnv):
+    """完全静止的环境：x/y 恒定，用于验证卡住判定。"""
+
+    def _make_info(self):
+        return {"x_pos": 100.0, "y_pos": 0.0}
+
+
+class _MovableEnv(_BaseMockEnv):
+    """x 可通过 ``env.unwrapped._pos`` 手动推进的环境。"""
+
+    def __init__(self):
+        super().__init__()
+        self._pos = 100.0
+
+    def _make_info(self):
+        return {"x_pos": self._pos, "y_pos": 0.0}
+```
+
+4. 把该类内的 4 个既有测试整体替换为下面 10 个（`ProgressReward` / `ScoreReward` / `FlagReward` 三个测试类保持不动）：
 
 ```python
 class TestStuckHandler:
@@ -277,15 +298,7 @@ class TestStuckHandler:
 
     def test_stuck_triggers(self):
         """站在原地不动超过阈值应惩罚并截断。"""
-        class _StuckEnv(_BaseMockEnv):
-            def __init__(self):
-                super().__init__()
-                self._pos = 100.0
-
-            def _make_info(self):
-                return {"x_pos": self._pos, "y_pos": 0.0}
-
-        env = StuckHandler(_StuckEnv(), max_stuck_steps=3, penalty=5.0)
+        env = StuckHandler(_MovableEnv(), max_stuck_steps=3, penalty=5.0)
         env.reset()
 
         # 前 2 步不动 → 第 3 步触发（>= max_stuck_steps）
@@ -301,15 +314,7 @@ class TestStuckHandler:
 
     def test_stuck_recovers(self):
         """取得净推进后停滞计数应清零。"""
-        class _RecoverEnv(_BaseMockEnv):
-            def __init__(self):
-                super().__init__()
-                self._pos = 100.0
-
-            def _make_info(self):
-                return {"x_pos": self._pos, "y_pos": 0.0}
-
-        env = StuckHandler(_RecoverEnv(), max_stuck_steps=3, penalty=5.0,
+        env = StuckHandler(_MovableEnv(), max_stuck_steps=3, penalty=5.0,
                            progress_epsilon=8.0)
         env.reset()
 
@@ -323,15 +328,7 @@ class TestStuckHandler:
 
     def test_small_drift_does_not_reset(self):
         """单步位移小于 progress_epsilon 的累计漂移不应被当作取得进展。"""
-        class _DriftEnv(_BaseMockEnv):
-            def __init__(self):
-                super().__init__()
-                self._pos = 100.0
-
-            def _make_info(self):
-                return {"x_pos": self._pos, "y_pos": 0.0}
-
-        env = StuckHandler(_DriftEnv(), max_stuck_steps=3, penalty=5.0,
+        env = StuckHandler(_MovableEnv(), max_stuck_steps=3, penalty=5.0,
                            progress_epsilon=8.0)
         env.reset()
 
@@ -345,10 +342,6 @@ class TestStuckHandler:
 
     def test_penalty_disabled_does_not_truncate(self):
         """penalty_enabled=False 时只统计，不扣分不截断。"""
-        class _StillEnv(_BaseMockEnv):
-            def _make_info(self):
-                return {"x_pos": 100.0, "y_pos": 0.0}
-
         env = StuckHandler(_StillEnv(), max_stuck_steps=2, penalty=5.0,
                            penalty_enabled=False)
         env.reset()
@@ -394,33 +387,20 @@ class TestStuckHandler:
 
     def test_stuck_tracks_max_x(self):
         """应追踪历史最大 x，回退时不变小。"""
-        class _PosEnv(_BaseMockEnv):
-            def __init__(self):
-                super().__init__()
-                self._pos = 0.0
-
-            def _make_info(self):
-                return {"x_pos": self._pos}
-
-        env = StuckHandler(_PosEnv(), max_stuck_steps=10, penalty=5.0)
+        env = StuckHandler(_MovableEnv(), max_stuck_steps=10, penalty=5.0)
         obs, info = env.reset()
-        assert info["max_x_pos"] == 0.0
+        assert info["max_x_pos"] == 100.0
 
-        env.unwrapped._pos = 50.0
+        env.unwrapped._pos = 150.0
         obs, reward, terminated, truncated, info = env.step(0)
-        assert info["max_x_pos"] == 50.0
+        assert info["max_x_pos"] == 150.0
 
-        env.unwrapped._pos = 30.0  # 后退
+        env.unwrapped._pos = 130.0  # 后退
         obs, reward, terminated, truncated, info = env.step(0)
-        assert info["max_x_pos"] == 50.0, "max_x_pos 不应缩小"
+        assert info["max_x_pos"] == 150.0, "max_x_pos 不应缩小"
 ```
 
-注意 `test_penalty_disabled_does_not_truncate` 显式传了 `rescue_enabled=False`：本任务还没有 `rescue_enabled` 形参，所以**本步骤先写成 `penalty_enabled=False` 单参数**，Task 3 再加 `rescue_enabled=False`。为避免歧义，本任务此测试写为：
-
-```python
-        env = StuckHandler(_StillEnv(), max_stuck_steps=2, penalty=5.0,
-                           penalty_enabled=False)
-```
+注意 `test_penalty_disabled_does_not_truncate` 只传 `penalty_enabled=False`：本任务还没有 `rescue_enabled` 形参，Task 3 才补上第二个开关（见 Task 3 Step 1 的改写条目）。
 
 - [ ] **Step 2: 运行测试确认失败**
 
@@ -563,7 +543,7 @@ git commit -m "fix(env): 卡住判定改用窗口内 x 净推进，修复贴墙�
 - Test: `tests/test_wrappers.py`（`TestStuckHandler`）
 
 **Interfaces:**
-- Consumes: Task 1 的 `EnvConfig.stuck_rescue_enabled` / `stuck_rescue_max_steps`；Task 2 的 `StuckHandler`
+- Consumes: Task 1 的 `EnvConfig.stuck_rescue_enabled` / `stuck_rescue_max_steps`；Task 2 的 `StuckHandler`；Task 2 在 `tests/test_wrappers.py` 模块级留下的共享 mock `_StillEnv` 与 `_MovableEnv`（本任务直接复用，不要再定义局部副本）
 - Produces: `StuckHandler(env, max_stuck_steps, penalty, progress_epsilon=8.0, penalty_enabled=True, rescue_enabled=True, rescue_max_steps=120)`；`info["rescuing"]: bool`、`info["rescue_steps"]: int`
 
 - [ ] **Step 1: 写失败测试**
@@ -575,10 +555,6 @@ git commit -m "fix(env): 卡住判定改用窗口内 x 净推进，修复贴墙�
 ```python
     def test_stuck_enters_rescue(self):
         """达到停滞阈值应进入脱困阶段，而非直接截断。"""
-        class _StillEnv(_BaseMockEnv):
-            def _make_info(self):
-                return {"x_pos": 100.0, "y_pos": 0.0}
-
         env = StuckHandler(_StillEnv(), max_stuck_steps=3, penalty=5.0)
         env.reset()
 
@@ -619,15 +595,7 @@ git commit -m "fix(env): 卡住判定改用窗口内 x 净推进，修复贴墙�
 
     def test_rescue_exits_on_progress(self):
         """脱困期间取得净推进应立即交还控制权。"""
-        class _EscapeEnv(_BaseMockEnv):
-            def __init__(self):
-                super().__init__()
-                self._pos = 100.0
-
-            def _make_info(self):
-                return {"x_pos": self._pos, "y_pos": 0.0}
-
-        env = StuckHandler(_EscapeEnv(), max_stuck_steps=2, penalty=5.0,
+        env = StuckHandler(_MovableEnv(), max_stuck_steps=2, penalty=5.0,
                            progress_epsilon=8.0, rescue_max_steps=10)
         env.reset()
 
@@ -644,10 +612,6 @@ git commit -m "fix(env): 卡住判定改用窗口内 x 净推进，修复贴墙�
 
     def test_rescue_budget_exhausted_truncates(self):
         """脱困预算用尽且惩罚开启时应扣分并截断。"""
-        class _StillEnv(_BaseMockEnv):
-            def _make_info(self):
-                return {"x_pos": 100.0, "y_pos": 0.0}
-
         env = StuckHandler(_StillEnv(), max_stuck_steps=2, penalty=5.0,
                            rescue_max_steps=3)
         env.reset()
@@ -668,10 +632,6 @@ git commit -m "fix(env): 卡住判定改用窗口内 x 净推进，修复贴墙�
 
     def test_rescue_budget_exhausted_without_penalty_restarts(self):
         """惩罚关闭时预算用尽不截断，无缝开始新一轮脱困。"""
-        class _StillEnv(_BaseMockEnv):
-            def _make_info(self):
-                return {"x_pos": 100.0, "y_pos": 0.0}
-
         env = StuckHandler(_StillEnv(), max_stuck_steps=2, penalty=5.0,
                            penalty_enabled=False, rescue_max_steps=3)
         env.reset()
@@ -689,10 +649,6 @@ git commit -m "fix(env): 卡住判定改用窗口内 x 净推进，修复贴墙�
 
     def test_no_rescue_truncates_at_threshold(self):
         """rescue_enabled=False 时保持旧行为：达到阈值直接扣分截断。"""
-        class _StillEnv(_BaseMockEnv):
-            def _make_info(self):
-                return {"x_pos": 100.0, "y_pos": 0.0}
-
         env = StuckHandler(_StillEnv(), max_stuck_steps=2, penalty=5.0,
                            rescue_enabled=False)
         env.reset()
