@@ -41,13 +41,15 @@ def make_mario_env(config: EnvConfig | None = None, render_mode=None, level_name
         env = ScoreReward(env, scale=config.score_reward_scale)
     if config.flag_reward_enabled:
         env = FlagReward(env, reward_value=config.flag_reward_value)
-    if config.stuck_penalty_enabled:
+    if config.stuck_penalty_enabled or config.stuck_rescue_enabled:
         env = StuckHandler(
             env,
             max_stuck_steps=config.stuck_max_steps,
             penalty=config.stuck_penalty,
             progress_epsilon=config.stuck_progress_epsilon,
             penalty_enabled=config.stuck_penalty_enabled,
+            rescue_enabled=config.stuck_rescue_enabled,
+            rescue_max_steps=config.stuck_rescue_max_steps,
         )
     env = GrayScaleObservation(env, keep_dim=False)
     env = ResizeObservation(env, shape=(config.resize_shape, config.resize_shape))

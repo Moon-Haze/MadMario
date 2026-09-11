@@ -84,7 +84,7 @@ class TestStuckHandler:
                 return {"x_pos": 100.0 + (self._step_n % 2), "y_pos": 0.0}
 
         env = StuckHandler(_WiggleEnv(), max_stuck_steps=3, penalty=5.0,
-                           progress_epsilon=8.0)
+                           progress_epsilon=8.0, rescue_enabled=False)
         env.reset()
 
         for i in range(2):
@@ -103,29 +103,14 @@ class TestStuckHandler:
             def _make_info(self):
                 return {"x_pos": 100.0, "y_pos": float(self._step_n % 2)}
 
-        env = StuckHandler(_JumpInPlaceEnv(), max_stuck_steps=2, penalty=5.0)
+        env = StuckHandler(_JumpInPlaceEnv(), max_stuck_steps=2, penalty=5.0,
+                           rescue_enabled=False)
         env.reset()
 
         for _ in range(2):
             obs, reward, terminated, truncated, info = env.step(0)
 
         assert truncated, "只有 y 变化必须判定为卡住"
-
-    def test_stuck_triggers(self):
-        """站在原地不动超过阈值应惩罚并截断。"""
-        env = StuckHandler(_MovableEnv(), max_stuck_steps=3, penalty=5.0)
-        env.reset()
-
-        # 前 2 步不动 → 第 3 步触发（>= max_stuck_steps）
-        for i in range(2):
-            obs, reward, terminated, truncated, info = env.step(0)
-            assert not truncated, f"第 {i + 1} 步不应截断"
-            assert info["stuck_steps"] == i + 1
-
-        obs, reward, terminated, truncated, info = env.step(0)
-        assert truncated, "应被截断"
-        assert reward == -5.0, f"应获得 -5.0 惩罚，实际 {reward}"
-        assert info["stuck"] is True
 
     def test_stuck_recovers(self):
         """取得净推进后停滞计数应清零。"""
@@ -144,7 +129,7 @@ class TestStuckHandler:
     def test_small_drift_does_not_reset(self):
         """单步位移小于 progress_epsilon 的累计漂移不应被当作取得进展。"""
         env = StuckHandler(_MovableEnv(), max_stuck_steps=3, penalty=5.0,
-                           progress_epsilon=8.0)
+                           progress_epsilon=8.0, rescue_enabled=False)
         env.reset()
 
         # 每步只前进 1 像素，累计 3 步仍是 3 < 8
@@ -158,7 +143,7 @@ class TestStuckHandler:
     def test_penalty_disabled_does_not_truncate(self):
         """penalty_enabled=False 时只统计，不扣分不截断。"""
         env = StuckHandler(_StillEnv(), max_stuck_steps=2, penalty=5.0,
-                           penalty_enabled=False)
+                           penalty_enabled=False, rescue_enabled=False)
         env.reset()
 
         for _ in range(5):
@@ -213,6 +198,112 @@ class TestStuckHandler:
         env.unwrapped._pos = 130.0  # 后退
         obs, reward, terminated, truncated, info = env.step(0)
         assert info["max_x_pos"] == 150.0, "max_x_pos 不应缩小"
+
+    def test_stuck_enters_rescue(self):
+        """达到停滞阈值应进入脱困阶段，而非直接截断。"""
+        env = StuckHandler(_StillEnv(), max_stuck_steps=3, penalty=5.0)
+        env.reset()
+
+        for i in range(2):
+            obs, reward, terminated, truncated, info = env.step(0)
+            assert info["rescuing"] is False, f"第 {i + 1} 步不应进入脱困"
+
+        obs, reward, terminated, truncated, info = env.step(0)
+        assert info["rescuing"] is True, "达到阈值应进入脱困"
+        assert info["rescue_steps"] == 0
+        assert not truncated, "进入脱困不应截断"
+        assert reward == 0.0, "进入脱困不应扣分"
+        assert "stuck" not in info, "进入脱困不置位 stuck 标记"
+
+    def test_rescue_takes_over_action(self, monkeypatch):
+        """脱困阶段下发给内层环境的动作来自 action_space，而非调用方传入值。"""
+        received = []
+
+        class _RecordingEnv(_BaseMockEnv):
+            def _make_info(self):
+                return {"x_pos": 100.0, "y_pos": 0.0}
+
+            def step(self, action):
+                received.append(action)
+                return super().step(action)
+
+        env = StuckHandler(_RecordingEnv(), max_stuck_steps=2, penalty=5.0,
+                           rescue_max_steps=5)
+        # 固定采样结果，避免概率性断言
+        monkeypatch.setattr(env.action_space, "sample", lambda: 3)
+        env.reset()
+
+        env.step(0)  # 第 1 步：策略动作
+        env.step(0)  # 第 2 步：达到阈值并进入脱困，本步仍是策略动作
+        env.step(0)  # 第 3 步：脱困接管
+
+        assert received == [0, 0, 3], f"脱困后应下发采样动作，实际 {received}"
+
+    def test_rescue_exits_on_progress(self):
+        """脱困期间取得净推进应立即交还控制权。"""
+        env = StuckHandler(_MovableEnv(), max_stuck_steps=2, penalty=5.0,
+                           progress_epsilon=8.0, rescue_max_steps=10)
+        env.reset()
+
+        env.step(0)  # 停滞 1 步
+        env.step(0)  # 达到阈值 → 进入脱困
+        env.unwrapped._pos = 120.0  # 脱困中推进 20 >= epsilon
+
+        obs, reward, terminated, truncated, info = env.step(0)
+        assert info["rescuing"] is False, "取得推进后应结束脱困"
+        assert info["rescue_steps"] == 0
+        assert info["stuck_steps"] == 0
+        assert not truncated
+        assert reward == 0.0
+
+    def test_rescue_budget_exhausted_truncates(self):
+        """脱困预算用尽且惩罚开启时应扣分并截断。"""
+        env = StuckHandler(_StillEnv(), max_stuck_steps=2, penalty=5.0,
+                           rescue_max_steps=3)
+        env.reset()
+
+        env.step(0)  # 停滞 1 步
+        env.step(0)  # 达到阈值 → 进入脱困
+
+        for i in range(2):  # 脱困第 1、2 步
+            obs, reward, terminated, truncated, info = env.step(0)
+            assert not truncated, f"脱困第 {i + 1} 步不应截断"
+        assert info["rescue_steps"] == 2
+
+        obs, reward, terminated, truncated, info = env.step(0)  # 脱困第 3 步，预算用尽
+        assert truncated, "预算用尽应截断"
+        assert reward == -5.0
+        assert info["stuck"] is True
+        assert info["rescuing"] is False
+
+    def test_rescue_budget_exhausted_without_penalty_restarts(self):
+        """惩罚关闭时预算用尽不截断，无缝开始新一轮脱困。"""
+        env = StuckHandler(_StillEnv(), max_stuck_steps=2, penalty=5.0,
+                           penalty_enabled=False, rescue_max_steps=3)
+        env.reset()
+
+        env.step(0)
+        env.step(0)  # 进入脱困
+
+        for _ in range(3):  # 脱困第 1、2、3 步
+            obs, reward, terminated, truncated, info = env.step(0)
+            assert not truncated, "惩罚关闭时不应截断"
+            assert reward == 0.0, "惩罚关闭时不应扣分"
+
+        assert info["rescuing"] is True, "应保持脱困状态（连续随机挣扎）"
+        assert info["rescue_steps"] == 0, "预算应已原地重置"
+
+    def test_no_rescue_truncates_at_threshold(self):
+        """rescue_enabled=False 时保持旧行为：达到阈值直接扣分截断。"""
+        env = StuckHandler(_StillEnv(), max_stuck_steps=2, penalty=5.0,
+                           rescue_enabled=False)
+        env.reset()
+
+        env.step(0)
+        obs, reward, terminated, truncated, info = env.step(0)
+        assert truncated, "关闭脱困后应恢复为直接判负"
+        assert reward == -5.0
+        assert info["stuck"] is True
 
 
 # ─────────────────────────────
