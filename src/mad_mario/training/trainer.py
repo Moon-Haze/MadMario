@@ -126,7 +126,8 @@ def train(config: AppConfig, log_path: Path | None = None) -> None:
         eval_freq=max(config.artifacts.eval_freq // config.artifacts.num_envs, 1),
         n_eval_episodes=config.artifacts.eval_episodes,
         deterministic=True,
-        verbose=1,
+        # verbose=0 静默评估打印；best model / eval_logs / tensorboard 记录不受影响
+        verbose=0,
     )
 
     # 自定义指标回调（CSV + PNG 图表 + Mario 特有指标）
