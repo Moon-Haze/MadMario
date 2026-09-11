@@ -30,6 +30,12 @@ class EnvConfig:
     stuck_penalty_enabled: bool = True
     stuck_max_steps: int = 120
     stuck_penalty: float = 5.0
+    # 窗口内净推进阈值（像素）：窗口内最大 x 相对窗口起点推进不足此值即视为未取得进展
+    stuck_progress_epsilon: float = 8.0
+    # 卡住后随机接管动作尝试脱困；关闭则回到"达到阈值直接判负"的旧行为
+    stuck_rescue_enabled: bool = True
+    # 救援预算（步）：用尽仍无进展时，按 stuck_penalty_enabled 决定判负或无缝重开
+    stuck_rescue_max_steps: int = 120
     progress_reward_enabled: bool = True
     progress_reward_scale: float = 0.01
     score_reward_enabled: bool = True
@@ -407,11 +413,18 @@ def add_train_args(parser: argparse.ArgumentParser) -> None:
     rw.add_argument("--no-reward-clip", action="store_true", help="关闭奖励裁剪")
     rw.add_argument("--reward-clip-value", type=float, default=EnvConfig.reward_clip_value,
                     help="奖励裁剪绝对值")
-    rw.add_argument("--no-stuck-penalty", action="store_true", help="关闭卡住惩罚")
+    rw.add_argument("--no-stuck-penalty", action="store_true",
+                    help="关闭卡住惩罚与提前结束（不关脱困；要完全关闭卡住处理需同时传 --no-stuck-rescue）")
     rw.add_argument("--stuck-max-steps", type=int, default=EnvConfig.stuck_max_steps,
-                    help="连续多少步无位移后判定卡住")
+                    help="连续多少步无净推进后判定卡住")
     rw.add_argument("--stuck-penalty", type=float, default=EnvConfig.stuck_penalty,
                     help="卡住时扣除的奖励")
+    rw.add_argument("--no-stuck-rescue", action="store_true",
+                    help="关闭卡住后的随机脱困干预（关闭后恢复为达到阈值直接判负）")
+    rw.add_argument("--stuck-rescue-max-steps", type=int, default=EnvConfig.stuck_rescue_max_steps,
+                    help="卡住后随机脱困的步数预算")
+    rw.add_argument("--stuck-progress-epsilon", type=float, default=EnvConfig.stuck_progress_epsilon,
+                    help="窗口内净推进阈值（像素），低于此值视为未取得进展")
     rw.add_argument("--no-progress-reward", action="store_true", help="关闭向右移动奖励")
     rw.add_argument("--progress-reward-scale", type=float, default=EnvConfig.progress_reward_scale,
                     help="每向右移动一像素的奖励系数")
@@ -478,6 +491,9 @@ def config_from_train_args(args) -> AppConfig:
         stuck_penalty_enabled=not args.no_stuck_penalty,
         stuck_max_steps=max(1, args.stuck_max_steps),
         stuck_penalty=args.stuck_penalty,
+        stuck_progress_epsilon=args.stuck_progress_epsilon,
+        stuck_rescue_enabled=not args.no_stuck_rescue,
+        stuck_rescue_max_steps=max(1, args.stuck_rescue_max_steps),
         progress_reward_enabled=not args.no_progress_reward,
         progress_reward_scale=args.progress_reward_scale,
         score_reward_enabled=not args.no_score_reward,
@@ -538,6 +554,7 @@ def config_from_play_args(args) -> AppConfig:
         worlds=worlds,
         clip_rewards=False,
         stuck_penalty_enabled=False,
+        stuck_rescue_enabled=True,
         progress_reward_enabled=False,
         score_reward_enabled=False,
         flag_reward_enabled=False,

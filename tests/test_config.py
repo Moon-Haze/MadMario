@@ -359,3 +359,48 @@ class TestBuildParser:
         with pytest.raises(SystemExit) as exc:
             parser.parse_args(["play", "--help"])
         assert exc.value.code == 0
+
+
+# ─────────────────────────────
+# 卡住脱困配置
+# ─────────────────────────────
+class TestStuckRescueConfig:
+    def test_env_config_defaults(self):
+        cfg = EnvConfig()
+        assert cfg.stuck_progress_epsilon == 8.0
+        assert cfg.stuck_rescue_enabled is True
+        assert cfg.stuck_rescue_max_steps == 120
+
+    def test_cli_flags_map_to_env_config(self):
+        parser = argparse.ArgumentParser()
+        add_train_args(parser)
+        args = parser.parse_args(
+            [
+                "--no-stuck-rescue",
+                "--stuck-rescue-max-steps",
+                "7",
+                "--stuck-progress-epsilon",
+                "3.5",
+            ]
+        )
+        config = config_from_train_args(args)
+        assert config.env.stuck_rescue_enabled is False
+        assert config.env.stuck_rescue_max_steps == 7
+        assert config.env.stuck_progress_epsilon == 3.5
+
+    def test_rescue_max_steps_clamped_to_one(self):
+        # 与 stuck_max_steps 一致：下限钳制为 1，避免预算为 0 时每步都判负
+        parser = argparse.ArgumentParser()
+        add_train_args(parser)
+        args = parser.parse_args(["--stuck-rescue-max-steps", "0"])
+        config = config_from_train_args(args)
+        assert config.env.stuck_rescue_max_steps == 1
+
+    def test_play_enables_rescue_without_penalty(self):
+        # 播放语义：不扣分、不因卡住提前结束关卡，但必须随机挣扎脱困
+        parser = argparse.ArgumentParser()
+        add_play_args(parser)
+        args = parser.parse_args([])
+        config = config_from_play_args(args)
+        assert config.env.stuck_penalty_enabled is False
+        assert config.env.stuck_rescue_enabled is True
