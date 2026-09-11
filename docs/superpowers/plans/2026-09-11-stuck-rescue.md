@@ -31,7 +31,7 @@
 
 - `info["stuck"]` **仅**在"救援失败且 `penalty_enabled=True`"（或矩阵第 3 行的阈值直达）时为 `True`；进入救援不置位。
 - `info` 必须先在 `reset()` / `step()` 内 `dict(info)` 复制再写入，避免污染向量环境复用的字典。
-- 保留 `info["max_x_pos"]`（`mad_mario.logging.metrics` 的 `mean_max_x_pos` 依赖它）与 `info["stuck_steps"]`。
+- 保留 `info["max_x_pos"]` 与 `info["stuck_steps"]`。注意：`info["max_x_pos"]` 当前在 `src/` 中无生产消费方（`metrics.py:103` 读的是 `info["x_pos"]` 并自行累计 `_max_x`），保留是为向后兼容；真正不可删的是 `info["x_pos"]`。
 - 内层环境已 `terminated`/`truncated` 时不覆盖其状态；`info["flag_get"]` 为真时跳过卡住判定、救援进入与判负。
 - 不改变 `ClipReward`/`ProgressReward`/`ScoreReward`/`FlagReward` 的行为，不改变包装器链中 `StuckHandler` 的位置（仍在 `FlagReward` 之后、`GrayScaleObservation` 之前）。
 - 测试命令一律用 `uv run pytest <path> -v`（项目为 uv 工程）。

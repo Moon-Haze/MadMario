@@ -133,7 +133,7 @@ RESCUE  --(rescue_steps >= rescue_max_steps，且 !penalty_enabled)---> RESCUE  
 
 | 字段 | 变化 |
 | --- | --- |
-| `info["max_x_pos"]` | 保留，值来自 `best_x`；`metrics.py` 的 `mean_max_x_pos` 依赖它 |
+| `info["max_x_pos"]` | 保留，值来自 `best_x`。**当前 `src/` 中无生产消费方**：`metrics.py:103` 读的是 `info["x_pos"]` 并自行累计 `_max_x`。保留该键是为向后兼容外部工具；真正不可删的是 `info["x_pos"]` |
 | `info["stuck_steps"]` | 保留，含义为 NORMAL 阶段下的停滞步数 |
 | `info["rescuing"]` | 新增，`bool` |
 | `info["rescue_steps"]` | 新增，`int` |

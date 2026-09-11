@@ -107,9 +107,10 @@ class TestStuckHandler:
                            rescue_enabled=False)
         env.reset()
 
-        for _ in range(2):
-            obs, reward, terminated, truncated, info = env.step(0)
+        obs, reward, terminated, truncated, info = env.step(0)
+        assert not truncated, "第 1 步不应提前截断"
 
+        obs, reward, terminated, truncated, info = env.step(0)
         assert truncated, "只有 y 变化必须判定为卡住"
 
     def test_stuck_recovers(self):
