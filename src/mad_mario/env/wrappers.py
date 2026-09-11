@@ -3,25 +3,37 @@ import numpy as np
 from gymnasium.wrappers import ClipReward, RepeatAction, ResizeObservation
 
 
-class StuckPenalty(gym.Wrapper):
-    def __init__(self, env, max_stuck_steps, penalty, movement_epsilon=0.0):
+class StuckHandler(gym.Wrapper):
+    """检测"水平方向长时间无净推进"，并扣分并提前结束回合。
+
+    判定口径：维护一个停滞窗口，窗口内只增不减的最大 x 相对窗口起点推进
+    不足 ``progress_epsilon`` 时累加 ``stuck_steps``。只看 ``x_pos``，不看
+    ``y_pos``——原地反复跳跃而 x 不前进同样属于卡住。
+
+    ``penalty_enabled=False`` 时只统计，不扣分也不截断。
+    """
+
+    def __init__(self, env, max_stuck_steps, penalty, progress_epsilon=8.0,
+                 penalty_enabled=True):
         super().__init__(env)
         self.max_stuck_steps = int(max_stuck_steps)
         self.penalty = float(penalty)
-        self.movement_epsilon = float(movement_epsilon)
-        self.last_x_pos = None
-        self.last_y_pos = None
-        self.max_x_pos = 0.0
+        self.progress_epsilon = float(progress_epsilon)
+        self.penalty_enabled = bool(penalty_enabled)
+        self.best_x = 0.0
+        self.window_start_x = 0.0
+        self.window_best_x = 0.0
         self.stuck_steps = 0
 
     def reset(self, **kwargs):
         obs, info = self.env.reset(**kwargs)
         info = dict(info)
-        self.last_x_pos = self._position_value(info.get("x_pos"))
-        self.last_y_pos = self._position_value(info.get("y_pos"))
-        self.max_x_pos = self.last_x_pos if self.last_x_pos is not None else 0.0
+        x_pos = self._position_value(info.get("x_pos"))
+        self.best_x = x_pos if x_pos is not None else 0.0
+        self.window_start_x = self.best_x
+        self.window_best_x = self.best_x
         self.stuck_steps = 0
-        info["max_x_pos"] = self.max_x_pos
+        info["max_x_pos"] = self.best_x
         info["stuck_steps"] = self.stuck_steps
         return obs, info
 
@@ -29,33 +41,29 @@ class StuckPenalty(gym.Wrapper):
         obs, reward, terminated, truncated, info = self.env.step(action)
         info = dict(info)
         x_pos = self._position_value(info.get("x_pos"))
-        y_pos = self._position_value(info.get("y_pos"))
 
         if x_pos is not None:
-            self.max_x_pos = max(self.max_x_pos, x_pos)
-
-        if x_pos is not None and y_pos is not None:
-            if self.last_x_pos is None or self.last_y_pos is None:
-                moved = True
-            else:
-                moved = (
-                    abs(x_pos - self.last_x_pos) > self.movement_epsilon
-                    or abs(y_pos - self.last_y_pos) > self.movement_epsilon
-                )
-
-            if moved:
+            self.best_x = max(self.best_x, x_pos)
+            self.window_best_x = max(self.window_best_x, x_pos)
+            if self.window_best_x - self.window_start_x >= self.progress_epsilon:
+                # 取得进展：窗口基准前移，停滞计数清零
+                self.window_start_x = self.window_best_x
                 self.stuck_steps = 0
-                self.last_x_pos = x_pos
-                self.last_y_pos = y_pos
             else:
                 self.stuck_steps += 1
 
-            if self.stuck_steps >= self.max_stuck_steps and not terminated and not truncated:
-                reward = float(reward) - self.penalty
-                truncated = True
-                info["stuck"] = True
+        if (
+            self.stuck_steps >= self.max_stuck_steps
+            and not terminated
+            and not truncated
+            and not info.get("flag_get")
+            and self.penalty_enabled
+        ):
+            reward = float(reward) - self.penalty
+            truncated = True
+            info["stuck"] = True
 
-        info["max_x_pos"] = self.max_x_pos
+        info["max_x_pos"] = self.best_x
         info["stuck_steps"] = self.stuck_steps
         return obs, reward, terminated, truncated, info
 

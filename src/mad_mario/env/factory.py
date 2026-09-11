@@ -7,7 +7,7 @@ from gymnasium.wrappers import ClipReward, FrameStackObservation as FrameStack, 
 from nes_py.wrappers import JoypadSpace
 
 from mad_mario.config import EnvConfig, build_env_name
-from mad_mario.env.wrappers import FlagReward, ProgressReward, ScoreReward, StuckPenalty
+from mad_mario.env.wrappers import FlagReward, ProgressReward, ScoreReward, StuckHandler
 
 
 MOVEMENT_ACTIONS = {
@@ -42,10 +42,12 @@ def make_mario_env(config: EnvConfig | None = None, render_mode=None, level_name
     if config.flag_reward_enabled:
         env = FlagReward(env, reward_value=config.flag_reward_value)
     if config.stuck_penalty_enabled:
-        env = StuckPenalty(
+        env = StuckHandler(
             env,
             max_stuck_steps=config.stuck_max_steps,
             penalty=config.stuck_penalty,
+            progress_epsilon=config.stuck_progress_epsilon,
+            penalty_enabled=config.stuck_penalty_enabled,
         )
     env = GrayScaleObservation(env, keep_dim=False)
     env = ResizeObservation(env, shape=(config.resize_shape, config.resize_shape))

@@ -7,7 +7,7 @@ import numpy as np
 import pytest
 from gymnasium.spaces import Box, Discrete
 
-from mad_mario.env.wrappers import FlagReward, ProgressReward, ScoreReward, StuckPenalty
+from mad_mario.env.wrappers import FlagReward, ProgressReward, ScoreReward, StuckHandler
 
 
 # ─────────────────────────────
@@ -36,91 +36,183 @@ class _BaseMockEnv(gym.Env):
 
 
 # ─────────────────────────────
-# StuckPenalty
+# StuckHandler
 # ─────────────────────────────
-class TestStuckPenalty:
+class _StillEnv(_BaseMockEnv):
+    """完全静止的环境：x/y 恒定，用于验证卡住判定。"""
+
+    def _make_info(self):
+        return {"x_pos": 100.0, "y_pos": 0.0}
+
+
+class _MovableEnv(_BaseMockEnv):
+    """x 可通过 ``env.unwrapped._pos`` 手动推进的环境。"""
+
+    def __init__(self):
+        super().__init__()
+        self._pos = 100.0
+
+    def _make_info(self):
+        return {"x_pos": self._pos, "y_pos": 0.0}
+
+
+class TestStuckHandler:
     def test_not_stuck_moves(self):
-        """正常移动时不应触发卡住。"""
+        """正常向右推进时不应触发卡住。"""
         class _MovingEnv(_BaseMockEnv):
             def _make_info(self):
                 return {"x_pos": float(self._step_n * 10), "y_pos": 0.0}
 
-        env = StuckPenalty(_MovingEnv(), max_stuck_steps=3, penalty=5.0)
+        env = StuckHandler(_MovingEnv(), max_stuck_steps=3, penalty=5.0,
+                           progress_epsilon=8.0)
         obs, info = env.reset()
         assert info["stuck_steps"] == 0
 
         for _ in range(5):
             obs, reward, terminated, truncated, info = env.step(0)
-            assert not truncated, "移动中不应被截断"
+            assert not truncated, "推进中不应被截断"
             assert info["stuck_steps"] == 0
+
+    def test_wiggle_does_not_reset(self):
+        """x 在 ±1 像素抖动时净推进不足阈值，必须仍判定为卡住。
+
+        旧实现只比较相邻两步，抖动会不断清零计数导致永远不触发；
+        本测试是该缺陷的回归证据。
+        """
+        class _WiggleEnv(_BaseMockEnv):
+            def _make_info(self):
+                return {"x_pos": 100.0 + (self._step_n % 2), "y_pos": 0.0}
+
+        env = StuckHandler(_WiggleEnv(), max_stuck_steps=3, penalty=5.0,
+                           progress_epsilon=8.0)
+        env.reset()
+
+        for i in range(2):
+            obs, reward, terminated, truncated, info = env.step(0)
+            assert not truncated, f"第 {i + 1} 步不应截断"
+            assert info["stuck_steps"] == i + 1, "抖动必须累加停滞计数"
+
+        obs, reward, terminated, truncated, info = env.step(0)
+        assert truncated, "抖动应被判定为卡住"
+        assert reward == -5.0, f"应获得 -5.0 惩罚，实际 {reward}"
+        assert info["stuck"] is True
+
+    def test_vertical_only_movement_counts_as_stuck(self):
+        """原地反复跳跃（只有 y 变化、x 不推进）同样属于卡住。"""
+        class _JumpInPlaceEnv(_BaseMockEnv):
+            def _make_info(self):
+                return {"x_pos": 100.0, "y_pos": float(self._step_n % 2)}
+
+        env = StuckHandler(_JumpInPlaceEnv(), max_stuck_steps=2, penalty=5.0)
+        env.reset()
+
+        for _ in range(2):
+            obs, reward, terminated, truncated, info = env.step(0)
+
+        assert truncated, "只有 y 变化必须判定为卡住"
 
     def test_stuck_triggers(self):
         """站在原地不动超过阈值应惩罚并截断。"""
-        class _StuckEnv(_BaseMockEnv):
-            def __init__(self):
-                super().__init__()
-                self._pos = 100.0
-
-            def _make_info(self):
-                return {"x_pos": self._pos, "y_pos": 0.0}
-
-        env = StuckPenalty(_StuckEnv(), max_stuck_steps=3, penalty=5.0)
+        env = StuckHandler(_MovableEnv(), max_stuck_steps=3, penalty=5.0)
         env.reset()
 
         # 前 2 步不动 → 第 3 步触发（>= max_stuck_steps）
         for i in range(2):
             obs, reward, terminated, truncated, info = env.step(0)
-            assert not truncated, f"第 {i+1} 步不应截断"
+            assert not truncated, f"第 {i + 1} 步不应截断"
             assert info["stuck_steps"] == i + 1
 
-        # 第 3 步触发
         obs, reward, terminated, truncated, info = env.step(0)
         assert truncated, "应被截断"
         assert reward == -5.0, f"应获得 -5.0 惩罚，实际 {reward}"
+        assert info["stuck"] is True
 
     def test_stuck_recovers(self):
-        """卡住后移动应重置计数器。"""
-        class _RecoverEnv(_BaseMockEnv):
-            def __init__(self):
-                super().__init__()
-                self._pos = 100.0
-
-            def _make_info(self):
-                return {"x_pos": self._pos, "y_pos": 0.0}
-
-        env = StuckPenalty(_RecoverEnv(), max_stuck_steps=3, penalty=5.0)
+        """取得净推进后停滞计数应清零。"""
+        env = StuckHandler(_MovableEnv(), max_stuck_steps=3, penalty=5.0,
+                           progress_epsilon=8.0)
         env.reset()
 
         for _ in range(2):  # 卡 2 步
             env.step(0)
 
-        # 移动一步
-        env.unwrapped._pos = 200.0
+        env.unwrapped._pos = 120.0  # 推进 20 >= epsilon
         obs, reward, terminated, truncated, info = env.step(0)
-        assert not truncated, "移动后不应截断"
-        assert info["stuck_steps"] == 0, "卡住计数器应重置"
+        assert not truncated, "推进后不应截断"
+        assert info["stuck_steps"] == 0, "停滞计数应重置"
+
+    def test_small_drift_does_not_reset(self):
+        """单步位移小于 progress_epsilon 的累计漂移不应被当作取得进展。"""
+        env = StuckHandler(_MovableEnv(), max_stuck_steps=3, penalty=5.0,
+                           progress_epsilon=8.0)
+        env.reset()
+
+        # 每步只前进 1 像素，累计 3 步仍是 3 < 8
+        for i in range(3):
+            env.unwrapped._pos += 1.0
+            obs, reward, terminated, truncated, info = env.step(0)
+            assert info["stuck_steps"] == i + 1, f"第 {i + 1} 步应仍在停滞窗口内"
+
+        assert truncated, "累计推进不足阈值时仍应判定为卡住"
+
+    def test_penalty_disabled_does_not_truncate(self):
+        """penalty_enabled=False 时只统计，不扣分不截断。"""
+        env = StuckHandler(_StillEnv(), max_stuck_steps=2, penalty=5.0,
+                           penalty_enabled=False)
+        env.reset()
+
+        for _ in range(5):
+            obs, reward, terminated, truncated, info = env.step(0)
+            assert not truncated, "惩罚关闭时不应截断"
+            assert reward == 0.0, "惩罚关闭时不应扣分"
+
+        assert info["stuck_steps"] == 5
+
+    def test_flag_get_suppresses_stuck(self):
+        """拉旗动画期间 x 可能不增，不应判定为卡住。
+
+        flag_get 抑制的是判负与救援进入，停滞计数仍照常维护。
+        """
+        class _FlagEnv(_BaseMockEnv):
+            def _make_info(self):
+                return {"x_pos": 100.0, "y_pos": 0.0, "flag_get": True}
+
+        env = StuckHandler(_FlagEnv(), max_stuck_steps=2, penalty=5.0)
+        env.reset()
+
+        for _ in range(5):
+            obs, reward, terminated, truncated, info = env.step(0)
+            assert not truncated, "flag_get 为真时不应判负"
+
+        assert info["stuck_steps"] == 5, "计数照常维护，只是不触发判负"
+
+    def test_missing_x_pos_never_triggers(self):
+        """info 无 x_pos 时不做判定、不累加计数。"""
+        class _NoPosEnv(_BaseMockEnv):
+            def _make_info(self):
+                return {}
+
+        env = StuckHandler(_NoPosEnv(), max_stuck_steps=2, penalty=5.0)
+        env.reset()
+
+        for _ in range(5):
+            obs, reward, terminated, truncated, info = env.step(0)
+            assert not truncated, "缺位置信息时不应误判"
+            assert info["stuck_steps"] == 0
 
     def test_stuck_tracks_max_x(self):
-        """应追踪最大 x 位置。"""
-        class _PosEnv(_BaseMockEnv):
-            def __init__(self):
-                super().__init__()
-                self._pos = 0.0
-
-            def _make_info(self):
-                return {"x_pos": self._pos}
-
-        env = StuckPenalty(_PosEnv(), max_stuck_steps=10, penalty=5.0)
+        """应追踪历史最大 x，回退时不变小。"""
+        env = StuckHandler(_MovableEnv(), max_stuck_steps=10, penalty=5.0)
         obs, info = env.reset()
-        assert info["max_x_pos"] == 0.0
+        assert info["max_x_pos"] == 100.0
 
-        env.unwrapped._pos = 50.0
+        env.unwrapped._pos = 150.0
         obs, reward, terminated, truncated, info = env.step(0)
-        assert info["max_x_pos"] == 50.0
+        assert info["max_x_pos"] == 150.0
 
-        env.unwrapped._pos = 30.0  # 后退
+        env.unwrapped._pos = 130.0  # 后退
         obs, reward, terminated, truncated, info = env.step(0)
-        assert info["max_x_pos"] == 50.0, "max_x_pos 不应缩小"
+        assert info["max_x_pos"] == 150.0, "max_x_pos 不应缩小"
 
 
 # ─────────────────────────────
