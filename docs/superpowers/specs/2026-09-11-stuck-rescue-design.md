@@ -240,7 +240,7 @@ def __init__(
 - `x_pos` 缺失（`None`）时不做判定、不累加任何计数、不进入救援；`info["max_x_pos"]` 保持上一次已知值。
 - `reset()` 时若 `x_pos` 缺失，`best_x`、`window_start_x`、`window_best_x` 均初始化为 `0.0`（沿用旧实现"缺失位置则记 0"的处理）。后续首次拿到真实 `x` 时，`window_best_x - window_start_x` 可能一次性超过阈值而判定为"取得进展"——这只会清零计数，无副作用，明确接受。
 - 内层已 `terminated` 或 `truncated` 时不覆盖其状态，只在救援失败分支且 `penalty_enabled` 为真时设置截断。
-- `info["flag_get"]` 为真时跳过卡住判定与救援进入。
+- `info["flag_get"]` 为真时跳过判负与救援进入（停滞计数仍照常维护，只是不触发任何处置）。
 - `rescue_max_steps` 下限钳制为 1（与 `stuck_max_steps` 一致，经由 `max(1, ...)` 在 `config_from_train_args` 中处理）。
 - **已知限制**：救援使用环境动作空间的 RNG，不受 SB3 `seed` 控制（`SubprocVecEnv` 创建时未显式播种，`AsyncVectorEnv`/`SubprocVecEnv` 由 SB3 以无 seed 方式重置）。因此救援动作序列不可复现。本期不解决——修复它需要改动向量环境的播种链路，超出范围。
 
