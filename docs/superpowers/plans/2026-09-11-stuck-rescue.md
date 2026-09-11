@@ -660,7 +660,7 @@ git commit -m "fix(env): 卡住判定改用窗口内 x 净推进，修复贴墙�
         assert info["stuck"] is True
 ```
 
-改写 Task 2 留下的 2 个测试：
+改写 Task 2 留下的测试：
 
 1. `test_stuck_triggers`：新语义下达到阈值只是**进入脱困**，不再截断。**整体删除**该测试（其职责已被 `test_stuck_enters_rescue` 承接，判负路径由 `test_no_rescue_truncates_at_threshold` 与 `test_rescue_budget_exhausted_truncates` 覆盖）。
 
@@ -671,7 +671,15 @@ git commit -m "fix(env): 卡住判定改用窗口内 x 净推进，修复贴墙�
                            penalty_enabled=False, rescue_enabled=False)
 ```
 
-改完后 `TestStuckHandler` 共 14 个测试（Task 2 的 10 个 − 删除 1 个 + 新增 5 个）。
+3. 同理，下列三个**检测口径**测试的意图是验证"卡住能被正确判出"，一旦默认开启脱困，达到阈值就不再截断，断言必然失败。它们同样需要补 `rescue_enabled=False`，把考察范围收回到检测本身——与第 2 条同一模式：
+
+```python
+# test_wiggle_does_not_reset / test_small_drift_does_not_reset / test_vertical_only_movement_counts_as_stuck
+        env = StuckHandler(_MovableEnv(), max_stuck_steps=..., penalty=5.0,
+                           progress_epsilon=8.0, rescue_enabled=False)
+```
+
+改完后 `TestStuckHandler` 共 15 个测试（Task 2 的 10 个 − 删除 1 个 + 新增 6 个）。
 
 - [ ] **Step 2: 运行测试确认失败**
 
