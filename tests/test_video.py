@@ -11,7 +11,7 @@ import imageio.v2 as iio
 import numpy as np
 import pytest
 
-from mad_mario.playback.runner import _unique_path, _video_filename
+from mad_mario.playback.runner import _rate_dirname, _unique_path, _video_filename
 from mad_mario.playback.video import VideoRecorder
 
 
@@ -418,11 +418,53 @@ class TestTimestampedVideoDir:
         assert (_only_subdir(tmp_path / "videos") / "1-1.mp4").exists()
 
 
-class TestSampleRuns:
-    """--sample N：每关跑 N 遍，每遍各抽一个探索率采样着玩。"""
+def _relative_videos(video_dir: Path) -> list[str]:
+    """落盘视频相对 video_dir 的路径（``0-041/1-1.mp4``），排好序便于断言。
 
-    def test_sample_run_is_named_after_its_rate(self, tmp_path: Path, monkeypatch):
-        """采样播放的文件名带探索率，一眼看出这段画面有多随机。"""
+    采样播放把探索率放进了子目录，直接 glob 拿不到；一律走这个函数，测试里
+    看到的路径形状也就与用户实际看到的目录树一致。
+    """
+    return sorted(str(p.relative_to(video_dir)) for p in video_dir.rglob("*.mp4"))
+
+
+def _drawn_dirs(model: _FakeModel) -> set[str]:
+    """这次实际用到的探索率，按目录命名规则写出来（0.041 → 0-041）。"""
+    return {f"{rate:.3f}".replace(".", "-") for rate in model.rates_used}
+
+
+class TestRateDirname:
+    """探索率 → 目录名：文件名留给关卡，随机强度交给目录。"""
+
+    def test_replaces_the_dot_with_a_dash(self):
+        assert _rate_dirname(0.041) == "0-041"
+        assert _rate_dirname(0.198) == "0-198"
+
+    def test_pads_to_three_decimals(self):
+        """定长才排得整齐，相邻目录也不会因位数不同而错位。"""
+        assert _rate_dirname(0.1) == "0-100"
+        assert _rate_dirname(1.0) == "1-000"
+
+    def test_no_rate_means_no_directory(self):
+        """贪心播放与拿不到探索率的模型都不该多套一层目录。"""
+        assert _rate_dirname(None) is None
+        assert _rate_dirname(float("nan")) is None
+
+
+class TestVideoFilename:
+    """视频文件名只认关卡，不再背负探索率。"""
+
+    def test_uses_the_level_short_name(self):
+        env = SimpleNamespace(world=1, level=1)
+
+        assert _video_filename(None, env) == "1-1.mp4"
+        assert _video_filename("SuperMarioBros-1-2-v0", env) == "1-2.mp4"
+
+
+class TestSampleRuns:
+    """--sample N：抽 N 个探索率，每个概率把全部关卡各播一遍。"""
+
+    def test_each_run_is_filed_under_its_rate(self, tmp_path: Path, monkeypatch):
+        """每个概率一个目录，目录里是干净的关卡文件名。"""
         model = _FakeModel()
         runner_mod = _patch_play(monkeypatch, _make_env_factory(), model=model)
         config = _play_config(
@@ -431,34 +473,20 @@ class TestSampleRuns:
 
         runner_mod.play(config)
 
-        videos = list((tmp_path / "videos").glob("*.mp4"))
-        assert len(videos) == 1
-        name = videos[0].name
-        assert re.fullmatch(r"1-1_\d\.\d{3}\.mp4", name), f"名字应带探索率，实际 {name}"
-        # 名字里的数字必须就是这一遍实际用的值，不能各写各的
-        used = {f"{rate:.3f}" for rate in model.rates_used}
-        assert name.split("_", 1)[1].removesuffix(".mp4") in used
+        paths = _relative_videos(tmp_path / "videos")
+        assert len(paths) == 1
+        assert re.fullmatch(r"\d-\d{3}/1-1\.mp4", paths[0]), f"路径形状不对：{paths[0]}"
+        # 目录名必须就是这一遍实际用的值，不能各写各的
+        assert {paths[0].split("/")[0]} == _drawn_dirs(model)
 
     def test_greedy_keeps_the_plain_filename(self, tmp_path: Path, monkeypatch):
-        """贪心没有探索率可言，文件名维持 1-1.mp4。"""
+        """贪心没有探索率可言，既不套目录也不改名字。"""
         runner_mod = _patch_play(monkeypatch, _make_env_factory())
         config = _play_config(tmp_path, levels=("SuperMarioBros-1-1-v0",))
 
         runner_mod.play(config)
 
         assert (tmp_path / "videos" / "1-1.mp4").exists()
-
-    def test_missing_rate_falls_back_to_the_plain_name(self):
-        """没有探索率可写时用朴素名字，而不是 1-1_nan.mp4。
-
-        非 DQN 模型（或日后换了策略）拿不到 exploration_rate，直接格式化会写出
-        nan 这种谁也看不懂的文件名。
-        """
-        env = SimpleNamespace(world=1, level=1)
-
-        assert _video_filename(None, env, None) == "1-1.mp4"
-        assert _video_filename(None, env, float("nan")) == "1-1.mp4"
-        assert _video_filename(None, env, 0.19761608882144843) == "1-1_0.198.mp4"
 
     def test_each_run_draws_its_own_rate(self, tmp_path: Path, monkeypatch):
         """N 遍抽 N 个不同的概率——这才是 --sample N 的意义所在。
@@ -478,7 +506,7 @@ class TestSampleRuns:
         )
 
     def test_each_run_keeps_its_own_video(self, tmp_path: Path, monkeypatch):
-        """三遍三个文件，一个都不能少——概率不同，文件名本就撞不上。"""
+        """三遍三个文件，一个都不能少——概率不同，目录本就撞不上。"""
         model = _FakeModel()
         runner_mod = _patch_play(monkeypatch, _make_env_factory(), model=model)
         config = _play_config(
@@ -487,8 +515,9 @@ class TestSampleRuns:
 
         runner_mod.play(config)
 
-        videos = list((tmp_path / "videos").glob("*.mp4"))
-        assert len(videos) == 3, f"三遍应留三个文件，实际 {[p.name for p in videos]}"
+        paths = _relative_videos(tmp_path / "videos")
+        assert len(paths) == 3, f"三遍应留三个文件，实际 {paths}"
+        assert {p.split("/")[0] for p in paths} == _drawn_dirs(model)
 
     def test_drawn_rate_stays_within_twice_the_checkpoint_rate(
         self, tmp_path: Path, monkeypatch
@@ -539,8 +568,8 @@ class TestSampleRuns:
             runner_mod.play(config)
 
         assert "抽不出任何随机性" in caplog.text
-        # 文件名退化成了朴素名字，兜底要保证两遍都留得下来
-        assert len(list((tmp_path / "videos").glob("*.mp4"))) == 2
+        # 没有探索率可依，两遍只能平铺在同一层，兜底要保证它们都留得下来
+        assert _relative_videos(tmp_path / "videos") == ["1-1.mp4", "1-1_2.mp4"]
 
     def test_each_run_resets_the_same_env(self, tmp_path: Path, monkeypatch):
         """同一关的各遍复用同一个 env：建环境很贵，reset() 本来就会重开一局。"""
@@ -556,8 +585,12 @@ class TestSampleRuns:
         assert envs[0].resets == 3, "每遍开始都要 reset"
         assert envs[0].closed
 
-    def test_runs_apply_to_every_level(self, tmp_path: Path, monkeypatch):
-        """多关卡时，每一关都跑满 N 遍，各抽各的。"""
+    def test_one_rate_covers_every_level(self, tmp_path: Path, monkeypatch):
+        """一个概率套用到全部关卡：同一个目录里装着这一遍打出的所有关卡。
+
+        这是"抽 N 个概率、每个概率播一遍"的直接体现——目录的含义是"在这个随机
+        强度下各关卡分别打成什么样"，装着同一目录的视频才谈得上横向对比。
+        """
         model = _FakeModel()
         envs: list[_FakeEnv] = []
         runner_mod = _patch_play(monkeypatch, _make_env_factory(envs=envs), model=model)
@@ -569,10 +602,14 @@ class TestSampleRuns:
 
         runner_mod.play(config)
 
-        videos = list((tmp_path / "videos").glob("*.mp4"))
-        assert len(videos) == 4, f"两关各两遍应为 4 个文件，实际 {[p.name for p in videos]}"
-        for level in ("1-1", "1-2"):
-            assert len([p for p in videos if p.name.startswith(f"{level}_")]) == 2
+        paths = _relative_videos(tmp_path / "videos")
+        assert len(paths) == 4, f"两个概率各播两关应为 4 个文件，实际 {paths}"
+        assert {p.split("/")[0] for p in paths} == _drawn_dirs(model), (
+            "目录应当只由抽到的概率决定，不该每关各开一个"
+        )
+        for dirname in _drawn_dirs(model):
+            assert f"{dirname}/1-1.mp4" in paths
+            assert f"{dirname}/1-2.mp4" in paths
         assert len(envs) == 2, "每个关卡各建一个环境，关内各遍复用"
 
     def test_every_run_samples(self, tmp_path: Path, monkeypatch):

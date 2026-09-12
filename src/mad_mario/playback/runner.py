@@ -114,17 +114,25 @@ def _run_episode(env, model, recorder, state, viewer=None, deterministic=True):
     return total_reward, step, flag_get, False
 
 
-def _video_filename(level_name, env_config, exploration_rate=None) -> str:
-    """关卡视频文件名。
+def _video_filename(level_name, env_config) -> str:
+    """关卡视频文件名：一律是干净的 1-1.mp4。
 
-    采样播放时把探索率写进名字（1-1_0.198.mp4），一眼能看出这段画面是在多大的
-    随机强度下跑出来的；贪心播放没有探索率可言，用干净的 1-1.mp4。
+    随机强度不进文件名，交给所在目录承担（见 _rate_dirname）——文件名留给关卡，
+    目录名留给这一遍的随机强度，两者各司其职；也不必为了塞进第二个信息让文件名
+    越接越长。
     """
-    base = _level_short_name(level_name, env_config)
-    # 探索率缺失（非 DQN 模型）时不写后缀，宁可名字朴素也别写出 1-1_nan.mp4
+    return f"{_level_short_name(level_name, env_config)}.mp4"
+
+
+def _rate_dirname(exploration_rate):
+    """这一遍的探索率对应的子目录名（0.041 → 0-041）；贪心播放没有，返回 None。
+
+    点号换成短横是为了当目录名用：目录名里带点容易和扩展名混淆，在 shell 补全
+    和 glob 里也碍事，横杠干净得多。
+    """
     if exploration_rate is None or not math.isfinite(exploration_rate):
-        return f"{base}.mp4"
-    return f"{base}_{exploration_rate:.3f}.mp4"
+        return None
+    return f"{exploration_rate:.3f}".replace(".", "-")
 
 
 def _rate_label(exploration_rate) -> str:
@@ -135,11 +143,12 @@ def _rate_label(exploration_rate) -> str:
 
 
 def _unique_path(directory: Path, filename: str) -> Path:
-    """给文件名让路，避免这一关的两遍互相覆盖。
+    """给文件名让路，避免同一目录下的两个视频互相覆盖。
 
-    每遍的探索率是各自抽的，正常不会重名；但文件名只保留三位小数，两遍抽到
-    同一个值的概率并非为零，而覆盖掉一整段录像连个痕迹都不会留下。撞名时加
-    _2、_3 往后顺延——这是意外情况的兜底，正常路径上文件名保持干净。
+    每遍的探索率是各自抽的，概率不同就落在不同目录、正常撞不上；但目录名只
+    保留三位小数，两遍抽到同一个值的概率并非为零，而覆盖掉一整段录像连个痕迹
+    都不会留下。撞名时加 _2、_3 往后顺延——这是意外情况的兜底，正常路径上
+    文件名保持干净。
     """
     path = directory / filename
     if not path.exists():
@@ -207,10 +216,11 @@ def play(config: AppConfig, catch_interrupt: bool = True) -> None:
     新开一个目录，好让同一模型的多场播放能并排比较。用 ``--no-show`` 可只录制
     不弹窗；没有显示器的环境（服务器 / SSH）会自动走这个行为。
 
-    默认每关贪心地跑一遍。把 ``config.play.sample_runs`` 设成 N，则每关跑 N 遍，
-    每遍**各自抽一个探索率**再按 ε-greedy 采样动作，各录一个视频——贪心配固定
-    初始状态时每次播放都逐帧相同，只有采样才能让轨迹分岔；而拿同一个 ε 重复
-    N 遍，看到的只是同一场戏重放 N 次。
+    默认每关贪心地跑一遍。把 ``config.play.sample_runs`` 设成 N，则抽 N 个探索率，
+    每个概率把配置里的全部关卡各播一遍，各录一个视频，落在以该探索率命名的
+    子目录下（``<时间戳>/0-041/1-1.mp4``）——贪心配固定初始状态时每次播放都
+    逐帧相同，只有采样才能让轨迹分岔；而拿同一个 ε 重复 N 遍，看到的只是同一场
+    戏重放 N 次。
 
     停止方式：关掉显示窗口，或按 Ctrl+C——两者都会保住已录制的部分。
 
@@ -235,6 +245,10 @@ def play(config: AppConfig, catch_interrupt: bool = True) -> None:
     model = None
     # 采样播放时才有值：checkpoint 自带的探索率，作为每遍抽样的均值
     base_rate = None
+    # 每一遍要用的探索率，开跑前一次性抽好，配置里的全部关卡共用同一个——
+    # 于是每个概率对应一个目录，装下这个随机强度下各关卡分别打成什么样。
+    # 贪心播放不抽样，占位一个 None 让下面按遍号取用时不必分岔
+    rates: list = [None]
     viewer = _open_viewer(config.play)
 
     try:
@@ -256,15 +270,20 @@ def play(config: AppConfig, catch_interrupt: bool = True) -> None:
                     # 中途的 1.0。打出来，免得画面糊了还以为是模型的问题
                     base_rate = float(getattr(model, "exploration_rate", float("nan")))
                     if not _has_exploration(base_rate):
+                        # 占位成长度与遍数一致，下面按遍号取用才不会越界；每遍
+                        # 都退回 checkpoint 原值，此处也就等于 0 或 nan
+                        rates = [None] * runs
                         logger.warning(
                             "checkpoint 的探索率是 %s（缺失或已衰减到 0），抽不出"
                             "任何随机性，每遍都会退化成贪心、彼此逐帧相同", base_rate,
                         )
                     else:
+                        rates = [_draw_exploration_rate(base_rate) for _ in range(runs)]
                         logger.info(
-                            "按 ε-greedy 采样动作玩 %d 遍：每遍在 [0, %.3f] 上"
-                            "各抽一个探索率（均值 %.3f），逐遍不同",
+                            "按 ε-greedy 采样动作玩 %d 遍：每遍在 [0, %.3f] 上各抽"
+                            "一个探索率（均值 %.3f），这一批抽到 %s",
                             runs, 2 * base_rate, base_rate,
+                            "、".join(_rate_label(rate) for rate in rates),
                         )
 
             level_label = level_name or f"世界{config.env.world}-{config.env.level}"
@@ -278,16 +297,20 @@ def play(config: AppConfig, catch_interrupt: bool = True) -> None:
                 # 同一关的每一遍复用同一个 env：建一个马里奥环境要几百毫秒，
                 # 而 reset() 本来就会把游戏打回初始状态
                 for run_idx in range(1, runs + 1):
-                    # 每遍现抽一个探索率并装回模型：DQN.predict 每次调用都现读
-                    # 这个属性，改写它就从下一帧起生效。抽不出来（模型没有可用
-                    # 的探索率）就照 checkpoint 原值播，不留空
-                    rate = _draw_exploration_rate(base_rate)
+                    # 取这一遍事先抽好的探索率并装回模型：DQN.predict 每次调用都
+                    # 现读这个属性，改写它就从下一帧起生效。抽不出来（模型没有
+                    # 可用的探索率）就照 checkpoint 原值播，不留空
+                    rate = rates[run_idx - 1]
                     if rate is None:
                         rate = base_rate
                     else:
                         model.exploration_rate = rate
+                    # 探索率决定子目录（0-041/），关卡决定文件名（1-1.mp4）；
+                    # 贪心播放没有探索率，直接平铺在 video_dir 下
+                    dirname = _rate_dirname(rate)
+                    run_dir = video_dir / dirname if dirname else video_dir
                     video_path = _unique_path(
-                        video_dir, _video_filename(level_name, config.env, rate)
+                        run_dir, _video_filename(level_name, config.env)
                     )
                     progress = f"（第 {run_idx}/{runs} 遍）" if runs > 1 else ""
                     state, _ = env.reset()
@@ -301,7 +324,7 @@ def play(config: AppConfig, catch_interrupt: bool = True) -> None:
                             "已录制 %d 帧 → %s",
                             level_label, progress, _rate_label(rate), step,
                             total_reward, flag_get, recorder.frame_count,
-                            video_path.name,
+                            video_path.relative_to(video_dir),
                         )
                     if viewer_closed:
                         break
