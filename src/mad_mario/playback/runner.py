@@ -8,9 +8,13 @@ from __future__ import annotations
 
 import logging
 import math
+import os
 import re
+import threading
 import time
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
+from typing import NamedTuple
 
 import numpy as np
 from stable_baselines3 import DQN
@@ -25,6 +29,32 @@ logger = logging.getLogger(__name__)
 # 录制只认 rgb_array。human 模式会弹出 pygame 窗口并让 render() 返回 None，
 # 与"播放不弹窗"的目标相悖——所以这里覆盖配置里的 render_mode，而不是照搬。
 RECORD_RENDER_MODE = "rgb_array"
+
+
+class _Playthrough(NamedTuple):
+    """一趟独立的播放：一个探索率、一个关卡、一个输出文件。"""
+
+    level_name: str | None
+    level_label: str
+    run_idx: int
+    runs: int
+    # 这一趟实际要用的探索率；贪心播放没有，为 None
+    rate: float | None
+    video_path: Path
+    # 相对 video_dir 的路径，进日志用——绝对路径太长，看的人只关心目录树
+    shown_path: str
+
+    @property
+    def progress(self) -> str:
+        return f"（第 {self.run_idx}/{self.runs} 遍）" if self.runs > 1 else ""
+
+
+class _LevelPlan(NamedTuple):
+    """一个关卡要录的全部趟次，顺序即播放顺序。"""
+
+    level_name: str | None
+    label: str
+    playthroughs: list[_Playthrough]
 
 
 def _level_short_name(level_name, config):
@@ -142,22 +172,27 @@ def _rate_label(exploration_rate) -> str:
     return f"{exploration_rate:.3f}"
 
 
-def _unique_path(directory: Path, filename: str) -> Path:
+def _unique_path(directory: Path, filename: str, taken: set[Path] | None = None) -> Path:
     """给文件名让路，避免同一目录下的两个视频互相覆盖。
 
     每遍的探索率是各自抽的，概率不同就落在不同目录、正常撞不上；但目录名只
     保留三位小数，两遍抽到同一个值的概率并非为零，而覆盖掉一整段录像连个痕迹
     都不会留下。撞名时加 _2、_3 往后顺延——这是意外情况的兜底，正常路径上
     文件名保持干净。
+
+    taken 是本轮已经占下的路径集合，选中的名字会加进去。并发播放时靠它把
+    "看一眼没人用就占上"这一步挪到派发之前，否则两个线程同时问同一个名字都会
+    得到"没人用"，兜底就形同虚设。
     """
+    taken = set() if taken is None else taken
+    stem, suffix = Path(filename).stem, Path(filename).suffix
     path = directory / filename
-    if not path.exists():
-        return path
-    stem, suffix = path.stem, path.suffix
     idx = 2
-    while (candidate := directory / f"{stem}_{idx}{suffix}").exists():
+    while path.exists() or path in taken:
+        path = directory / f"{stem}_{idx}{suffix}"
         idx += 1
-    return candidate
+    taken.add(path)
+    return path
 
 
 def _has_exploration(base_rate) -> bool:
@@ -192,6 +227,165 @@ def _reseed_for_sampling() -> None:
     np.random.seed(None)
 
 
+def _playback_threads() -> int:
+    """无窗口播放开几个线程：CPU 核心数的一半，至少 1。
+
+    渲染、推理、编码全是 CPU 活，按核心数开满只会让它们互相抢；留一半给系统
+    和其他进程，整体反而更快。
+    """
+    return max(1, (os.cpu_count() or 2) // 2)
+
+
+def _plan_playthroughs(video_dir, levels, env_config, runs, rates) -> list[_LevelPlan]:
+    """把要录的每一趟排好，并把输出路径在这一步就定死。
+
+    路径必须在派发线程之前定好（见 _unique_path 的 taken）。计划本身与执行
+    方式无关：串行还是并发，录出来的目录树完全一样。
+    """
+    taken: set[Path] = set()
+    plan = []
+    for level_name in levels:
+        label = level_name or f"世界{env_config.world}-{env_config.level}"
+        playthroughs = []
+        for run_idx in range(1, runs + 1):
+            rate = rates[run_idx - 1]
+            # 探索率决定子目录（0-041/），关卡决定文件名（1-1.mp4）；贪心播放
+            # 没有探索率，直接平铺在 video_dir 下
+            dirname = _rate_dirname(rate)
+            run_dir = video_dir / dirname if dirname else video_dir
+            path = _unique_path(run_dir, _video_filename(level_name, env_config), taken)
+            playthroughs.append(_Playthrough(
+                level_name=level_name,
+                level_label=label,
+                run_idx=run_idx,
+                runs=runs,
+                rate=rate,
+                video_path=path,
+                shown_path=str(path.relative_to(video_dir)),
+            ))
+        plan.append(_LevelPlan(level_name=level_name, label=label,
+                               playthroughs=playthroughs))
+    return plan
+
+
+def _record_playthrough(playthrough, env, model, config, deterministic, viewer=None) -> bool:
+    """跑完一趟并把画面录下来。返回是否因为显示窗口被关掉而中断。
+
+    串行与并发两条路都走这里，免得录制接线出现两份、改一处漏一处。
+    """
+    if not deterministic:
+        # DQN.predict 每次调用都现读这个属性，改写它就从下一帧起生效
+        model.exploration_rate = playthrough.rate
+    state, _ = env.reset()
+    with VideoRecorder(playthrough.video_path, fps=config.play.video_fps) as recorder:
+        total_reward, step, flag_get, viewer_closed = _run_episode(
+            env, model, recorder, state, viewer, deterministic=deterministic
+        )
+        logger.info(
+            "关卡 %s%s：探索率=%s，步数=%d，奖励=%.1f，通关=%s，已录制 %d 帧 → %s",
+            playthrough.level_label, playthrough.progress,
+            _rate_label(playthrough.rate), step, total_reward, flag_get,
+            recorder.frame_count, playthrough.shown_path,
+        )
+    return viewer_closed
+
+
+def _log_level_start(level, level_idx, level_count, runs, video_dir) -> None:
+    logger.info(
+        "=== 播放关卡 %s（%d/%d），共 %d 遍 → %s ===",
+        level.label, level_idx, level_count, runs, video_dir,
+    )
+
+
+def _play_serially(plan, config, model, viewer, deterministic, video_dir) -> None:
+    """有显示窗口时一趟一趟地播：画面必须按顺序送进同一个窗口，快不了。
+
+    同一个关卡的各遍复用同一个环境：建一个马里奥环境要一百多毫秒，而 reset()
+    本来就会把游戏打回初始状态。
+    """
+    for level_idx, level in enumerate(plan, start=1):
+        _log_level_start(level, level_idx, len(plan), level.playthroughs[0].runs, video_dir)
+        env = make_mario_env(
+            config.env, render_mode=RECORD_RENDER_MODE, level_name=level.level_name
+        )
+        try:
+            for playthrough in level.playthroughs:
+                closed = _record_playthrough(
+                    playthrough, env, model, config, deterministic, viewer
+                )
+                if closed:
+                    logger.info(
+                        "显示窗口已关闭，停止播放；已录制的视频保留在 %s", video_dir
+                    )
+                    return
+        finally:
+            env.close()
+
+
+# 每个播放线程自己的模型。DQN.predict 的 ε-greedy 要读 model.exploration_rate，
+# 多个线程共用一个实例就会互相改写这个属性，视频目录名立刻变成假话。自备一份
+# 副本的代价只是几 MB 权重和一次加载，换来的是线程之间零共享可变状态。
+_worker_state = threading.local()
+
+
+def _worker_model(checkpoint_path, deterministic):
+    """取本线程的模型，没有就现加载一份。
+
+    DQN.load 会拿存档里的 seed 重播全局 numpy。采样播放时这会把主线程刚按熵
+    播下的种按回固定值，各线程的采样序列因此彼此撞车——加载完立刻交还随机性。
+    贪心播放一个随机数都不抽，就别去动随机流了：训练侧录最优模型是在训练进程
+    里跑的，平白重播 numpy 会搅乱训练自身的随机性。
+    """
+    model = getattr(_worker_state, "model", None)
+    if model is None:
+        model = DQN.load(str(checkpoint_path), device="auto")
+        if not deterministic:
+            _reseed_for_sampling()
+        _worker_state.model = model
+    return model
+
+
+def _play_one(playthrough, config, checkpoint_path, deterministic) -> None:
+    """一个线程里跑完一趟：自备模型与环境，录完就收工。
+
+    环境按趟建而不是按关卡复用：趟次怎么分给线程由调度决定，缓存环境就得处理
+    跨线程的归属和收尾，为省一百多毫秒不值当。
+    """
+    env = make_mario_env(
+        config.env, render_mode=RECORD_RENDER_MODE, level_name=playthrough.level_name
+    )
+    try:
+        model = _worker_model(checkpoint_path, deterministic)
+        _record_playthrough(playthrough, env, model, config, deterministic)
+    finally:
+        env.close()
+
+
+def _play_parallel(plan, config, checkpoint_path, deterministic, video_dir) -> None:
+    """没有显示窗口时把各趟播放摊到线程上并发跑。"""
+    playthroughs = [pt for level in plan for pt in level.playthroughs]
+    for level_idx, level in enumerate(plan, start=1):
+        _log_level_start(level, level_idx, len(plan), level.playthroughs[0].runs, video_dir)
+    workers = min(_playback_threads(), len(playthroughs))
+    # 只有一趟时按额度也只会开一个线程，说"并发执行"名不副实，不如不说
+    if workers > 1:
+        logger.info(
+            "无显示窗口，%d 趟播放分给 %d 个线程并发执行（每线程各加载一份模型）",
+            len(playthroughs), workers,
+        )
+    pool = ThreadPoolExecutor(max_workers=workers, thread_name_prefix="mario-play")
+    try:
+        # 逐个取结果而不是等 as_completed：线程里冒出来的异常要带回主线程，
+        # 否则一个坏掉的环境会静默地少录几段视频
+        for future in [pool.submit(_play_one, pt, config, checkpoint_path, deterministic)
+                       for pt in playthroughs]:
+            future.result()
+    finally:
+        # cancel_futures 只拦得住还没开跑的趟次；线程没法从外面掐断，已经在播的
+        # 会自己收尾，所以中断后最多还要等 workers 趟播完
+        pool.shutdown(wait=True, cancel_futures=True)
+
+
 def _timestamped_dir(base: Path) -> Path:
     """在 base 下开一个以本地时间命名的新目录，让每次播放各存一份。
 
@@ -222,7 +416,12 @@ def play(config: AppConfig, catch_interrupt: bool = True) -> None:
     逐帧相同，只有采样才能让轨迹分岔；而拿同一个 ε 重复 N 遍，看到的只是同一场
     戏重放 N 次。
 
-    停止方式：关掉显示窗口，或按 Ctrl+C——两者都会保住已录制的部分。
+    没有显示窗口时（``--no-show``，或机器上根本开不出图形后端），各趟播放会摊到
+    多个线程上并发跑，线程数取 CPU 核心数的一半——录制与推理解码都是 CPU 活，
+    开满只会互相抢。有窗口就得一趟一趟地喂帧，快不了。
+
+    停止方式：关掉显示窗口，或按 Ctrl+C——两者都会保住已录制的部分。并发播放时
+    已经在跑的那几趟会先播完，Ctrl+C 停不掉半途的线程。
 
     Args:
         catch_interrupt: 为 True（命令行播放入口）时自行消化 Ctrl+C，只记一条
@@ -235,105 +434,57 @@ def play(config: AppConfig, catch_interrupt: bool = True) -> None:
 
     levels = config.env.levels or [None]
     sample_runs = config.play.sample_runs
-    # 没开采样就是贪心地跑一遍；两者共用同一个循环，省得代码里到处分岔
+    # 没开采样就是贪心地跑一遍；两者共用同一套计划，省得代码里到处分岔
     runs = sample_runs or 1
     deterministic = sample_runs == 0
     base_dir = config.play.video_dir or (config.artifacts.save_root / "videos")
     # 训练侧自己按步数分好了目录，再来一层时间戳只是多余的套娃
     video_dir = _timestamped_dir(base_dir) if config.play.timestamp_videos else base_dir
     logger.info("视频输出目录: %s", video_dir)
+
+    # 有窗口才需要主线程这份模型喂画面；没有窗口时模型由各播放线程自备，
+    # 只在要读 checkpoint 的探索率时才非加载不可
+    viewer = _open_viewer(config.play)
     model = None
-    # 采样播放时才有值：checkpoint 自带的探索率，作为每遍抽样的均值
-    base_rate = None
     # 每一遍要用的探索率，开跑前一次性抽好，配置里的全部关卡共用同一个——
     # 于是每个概率对应一个目录，装下这个随机强度下各关卡分别打成什么样。
-    # 贪心播放不抽样，占位一个 None 让下面按遍号取用时不必分岔
+    # 贪心播放不抽样，占位一个 None 让按遍号取用时不必分岔
     rates: list = [None]
-    viewer = _open_viewer(config.play)
 
     try:
-        for level_idx, level_name in enumerate(levels, start=1):
-            env = make_mario_env(
-                config.env, render_mode=RECORD_RENDER_MODE, level_name=level_name
-            )
-
-            # 首次加载模型
-            if model is None:
-                logger.info(f"正在加载 checkpoint: {checkpoint_path}")
-                model = DQN.load(str(checkpoint_path), device="auto")
-                logger.info(f"模型已加载。已训练步数: {model.num_timesteps}")
-                if sample_runs:
-                    # 必须在 load 之后：DQN.load 会拿存档里的 seed 重播 numpy，
-                    # 在那之前重新播种等于没播
-                    _reseed_for_sampling()
-                    # checkpoint 里的探索率是抽样的均值，可能是 0.02 也可能是训练
-                    # 中途的 1.0。打出来，免得画面糊了还以为是模型的问题
-                    base_rate = float(getattr(model, "exploration_rate", float("nan")))
-                    if not _has_exploration(base_rate):
-                        # 占位成长度与遍数一致，下面按遍号取用才不会越界；每遍
-                        # 都退回 checkpoint 原值，此处也就等于 0 或 nan
-                        rates = [None] * runs
-                        logger.warning(
-                            "checkpoint 的探索率是 %s（缺失或已衰减到 0），抽不出"
-                            "任何随机性，每遍都会退化成贪心、彼此逐帧相同", base_rate,
-                        )
-                    else:
-                        rates = [_draw_exploration_rate(base_rate) for _ in range(runs)]
-                        logger.info(
-                            "按 ε-greedy 采样动作玩 %d 遍：每遍在 [0, %.3f] 上各抽"
-                            "一个探索率（均值 %.3f），这一批抽到 %s",
-                            runs, 2 * base_rate, base_rate,
-                            "、".join(_rate_label(rate) for rate in rates),
-                        )
-
-            level_label = level_name or f"世界{config.env.world}-{config.env.level}"
-            logger.info(
-                "=== 播放关卡 %s（%d/%d），共 %d 遍 → %s ===",
-                level_label, level_idx, len(levels), runs, video_dir,
-            )
-
-            viewer_closed = False
-            try:
-                # 同一关的每一遍复用同一个 env：建一个马里奥环境要几百毫秒，
-                # 而 reset() 本来就会把游戏打回初始状态
-                for run_idx in range(1, runs + 1):
-                    # 取这一遍事先抽好的探索率并装回模型：DQN.predict 每次调用都
-                    # 现读这个属性，改写它就从下一帧起生效。抽不出来（模型没有
-                    # 可用的探索率）就照 checkpoint 原值播，不留空
-                    rate = rates[run_idx - 1]
-                    if rate is None:
-                        rate = base_rate
-                    else:
-                        model.exploration_rate = rate
-                    # 探索率决定子目录（0-041/），关卡决定文件名（1-1.mp4）；
-                    # 贪心播放没有探索率，直接平铺在 video_dir 下
-                    dirname = _rate_dirname(rate)
-                    run_dir = video_dir / dirname if dirname else video_dir
-                    video_path = _unique_path(
-                        run_dir, _video_filename(level_name, config.env)
+        if viewer is not None or sample_runs:
+            logger.info(f"正在加载 checkpoint: {checkpoint_path}")
+            model = DQN.load(str(checkpoint_path), device="auto")
+            logger.info(f"模型已加载。已训练步数: {model.num_timesteps}")
+            if sample_runs:
+                # 必须在 load 之后：DQN.load 会拿存档里的 seed 重播 numpy，
+                # 在那之前重新播种等于没播
+                _reseed_for_sampling()
+                # checkpoint 里的探索率是抽样的均值，可能是 0.02 也可能是训练
+                # 中途的 1.0。打出来，免得画面糊了还以为是模型的问题
+                base_rate = float(getattr(model, "exploration_rate", float("nan")))
+                if _has_exploration(base_rate):
+                    rates = [_draw_exploration_rate(base_rate) for _ in range(runs)]
+                    logger.info(
+                        "按 ε-greedy 采样动作玩 %d 遍：每遍在 [0, %.3f] 上各抽一个"
+                        "探索率（均值 %.3f），这一批抽到 %s",
+                        runs, 2 * base_rate, base_rate,
+                        "、".join(_rate_label(rate) for rate in rates),
                     )
-                    progress = f"（第 {run_idx}/{runs} 遍）" if runs > 1 else ""
-                    state, _ = env.reset()
-                    with VideoRecorder(video_path, fps=config.play.video_fps) as recorder:
-                        total_reward, step, flag_get, viewer_closed = _run_episode(
-                            env, model, recorder, state, viewer,
-                            deterministic=deterministic,
-                        )
-                        logger.info(
-                            "关卡 %s%s：探索率=%s，步数=%d，奖励=%.1f，通关=%s，"
-                            "已录制 %d 帧 → %s",
-                            level_label, progress, _rate_label(rate), step,
-                            total_reward, flag_get, recorder.frame_count,
-                            video_path.relative_to(video_dir),
-                        )
-                    if viewer_closed:
-                        break
-            finally:
-                env.close()
+                else:
+                    # 抽不出随机性：每一遍都退回 checkpoint 原值（也就是 0 或
+                    # nan）。长度仍与遍数一致，按遍号取用不会越界
+                    rates = [base_rate] * runs
+                    logger.warning(
+                        "checkpoint 的探索率是 %s（缺失或已衰减到 0），抽不出任何"
+                        "随机性，每遍都会退化成贪心、彼此逐帧相同", base_rate,
+                    )
 
-            if viewer_closed:
-                logger.info("显示窗口已关闭，停止播放；已录制的视频保留在 %s", video_dir)
-                break
+        plan = _plan_playthroughs(video_dir, levels, config.env, runs, rates)
+        if viewer is None:
+            _play_parallel(plan, config, checkpoint_path, deterministic, video_dir)
+        else:
+            _play_serially(plan, config, model, viewer, deterministic, video_dir)
     except KeyboardInterrupt:
         if not catch_interrupt:
             raise

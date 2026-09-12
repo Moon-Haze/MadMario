@@ -125,7 +125,7 @@ python -m mad_mario.cli play [options]
 | `--flat-save-root` | *(flag)* | Use save-root directly without subdirectory |
 | `--video-dir` | `<save-root>/videos` | Parent directory for recorded videos; a timestamped subdirectory is created inside it |
 | `--video-fps` | `15` | Video frame rate — 15 matches real speed at `frame_skip=4` |
-| `--no-show` | *(flag)* | Record only, without the live window |
+| `--no-show` | *(flag)* | Record only, without the live window. Playthroughs are spread across threads (`cpu_count / 2`) instead of played one at a time |
 
 ### Running
 
@@ -202,7 +202,7 @@ Playback shows the game in a window while recording it: each level gets its own 
 
 The directory is named after local start time (`YYYYMMDD_HHMMSS`); playing twice within the same second appends a counter (`20260912_143022_2`) rather than sharing a directory. `--video-dir` only changes where the parent goes — the timestamped directory is still created inside it.
 
-Every run records **the same playthrough**: playback takes the argmax action, and the emulator always resets Mario to the same starting state, so the same inputs produce the same trajectory frame for frame. Playing twice gives two byte-identical videos.
+Every run records **the same playthrough**: playback takes the argmax action, and the emulator always resets Mario to the same starting state, so the same inputs produce the same trajectory frame for frame. Playing twice gives two byte-identical videos — on the levels that end before Mario gets stuck. When he does get stuck, the stuck handler takes over the action and samples it from the action space rather than from the policy, which is the only way out of a loop the policy keeps walking back into; that sample is drawn from a per-environment RNG, so those clips differ run to run. In a 32-level greedy run, 27 came out byte-identical across two runs and the same 5 did not — and the same 5 across two runs of the serial path, which is how you can tell it is the rescue and not the playback.
 
 `--sample N` is what breaks that tie — it draws `N` exploration rates, uniformly from `[0, 2 × ε]` where `ε` is the rate stored in the checkpoint, and plays **every level once per draw**:
 
@@ -229,9 +229,9 @@ The range is symmetric around the checkpoint's own rate, so its mean is that rat
 
 A bare `--sample` means `--sample 1`. Greedy playback has no exploration rate to show, so it stays flat — `videos/20260912_143022/1-1.mp4`, no subdirectory. Two draws only collide if they round to the same three decimals (about a 1% chance at `N=3`); when that happens the second playthrough's clips get `_2` appended (`1-1_2.mp4`) instead of overwriting the first, which is exactly the kind of loss nobody would ever diagnose.
 
-The runs of one level share a single environment instance — it is reset between them, which is what makes each run a fresh game rather than a continuation.
+With a window, the runs of one level share a single environment instance — it is reset between them, which is what makes each run a fresh game rather than a continuation. Without one they do not: see below.
 
-`--sample` also reseeds the random number generator from OS entropy after loading: a checkpoint carries the training `seed` (this repository's stores `42`), and `DQN.load` replays it, which would otherwise make separate runs draw the identical "random" rates and sample the identical sequence — producing byte-identical videos again.
+`--sample` also reseeds the random number generator from OS entropy after loading: a checkpoint carries the training `seed` (this repository's stores `42`), and `DQN.load` replays it, which would otherwise make separate runs draw the identical "random" rates and sample the identical sequence — producing byte-identical videos again. Each worker thread reseeds once more after loading its own copy, for the same reason between threads: every one of them loading the same archive would otherwise replay one sequence between them.
 
 The sampling strength comes from the checkpoint, which is a training artifact rather than a playback choice: this repository's model stores `0.198`, so each draw comes from `[0, 0.396]`, i.e. somewhere between always taking the argmax and having roughly two steps in five be random. Episode length and reward vary as a result; in one real run three playthroughs of 1-1 ended at 38, 42 and 205 steps. To see even more of them, raise `N` or run the command again — the timestamped directory keeps each batch from overwriting the last.
 
@@ -244,6 +244,12 @@ It stops when you close the window or press `Ctrl+C`; either way the partial rec
 Video needs pixel frames, so playback always forces `rgb_array` rendering regardless of `--render-mode`. A clip contains one frame per agent step plus the opening frame, so its length is `steps / video_fps` seconds.
 
 Pass `--no-show` to record without a window — that is also what happens automatically on a machine with no display (a server or an SSH session), where playback logs a warning and records the video only. Either way each frame is rendered once and used for both output.
+
+A window has to show one frame after another, so it cannot be sped up. Without one there is nothing to keep in step, and playback spreads the queue across threads instead: `min(cpu_count / 2, playthroughs)` of them, each with its own copy of the model and its own environment. Half the cores are left to whatever else the machine is doing, and it is capped by the amount of work rather than by the machine — two runs do not open twelve threads to stand around. It pays off on the batch runs: 32 greedy levels on a 24-core machine went from 35s to 13s, and a `--sample 2 --levels 1-1,1-2,1-3,1-4` batch recorded its 8 playthroughs in 6.4s.
+
+Each thread loads a private model rather than sharing one. `DQN.predict` reads `model.exploration_rate` on every call and each playthrough rewrites it to the rate it drew, so a shared instance would have threads overwriting each other's number — and the directory names, which are that number, would quietly become fiction. The environment is per playthrough too: which playthrough lands on which thread is up to the scheduler, and caching environments across threads means owning their handoff and cleanup for the sake of about 160 milliseconds.
+
+`Ctrl+C` behaves differently depending on which path you are on. With a window it stops between levels, immediately. Without one, the playthroughs already running finish first — a thread cannot be interrupted from outside — so count on up to `cpu_count / 2` of them still completing; the clips they recorded are kept either way.
 
 ### Automatic Recording of the Best Model
 
