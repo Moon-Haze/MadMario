@@ -11,7 +11,7 @@ import imageio.v2 as iio
 import numpy as np
 import pytest
 
-from mad_mario.playback.runner import _video_filename
+from mad_mario.playback.runner import _unique_path, _video_filename
 from mad_mario.playback.video import VideoRecorder
 
 
@@ -76,6 +76,10 @@ class _FakeModel:
 
     sampled 记下采样分支抽到的随机数：真 DQN 的 ε-greedy 走的是全局 numpy
     随机流，这里照抄那条路径，才测得出"种子被按回固定值"这类问题。
+
+    rates_used 记下每次推理时模型身上的 exploration_rate：play() 是改写这个
+    属性来切换每遍的随机强度的，记下来才能验证文件名里的数字与实际用的是
+    同一个值，而不是各写各的。
     """
 
     num_timesteps = 1234
@@ -84,11 +88,13 @@ class _FakeModel:
     def __init__(self):
         self.deterministic_calls: list[bool] = []
         self.sampled: list[float] = []
+        self.rates_used: list[float] = []
 
     def predict(self, state, deterministic=True):
         self.deterministic_calls.append(deterministic)
         if not deterministic:
             self.sampled.append(float(np.random.rand()))
+            self.rates_used.append(self.exploration_rate)
         return 1, None
 
 
@@ -413,22 +419,25 @@ class TestTimestampedVideoDir:
 
 
 class TestSampleRuns:
-    """--sample N：每关按 ε-greedy 采样玩 N 遍。"""
+    """--sample N：每关跑 N 遍，每遍各抽一个探索率采样着玩。"""
 
-    def test_sample_run_is_named_after_the_rate(self, tmp_path: Path, monkeypatch):
+    def test_sample_run_is_named_after_its_rate(self, tmp_path: Path, monkeypatch):
         """采样播放的文件名带探索率，一眼看出这段画面有多随机。"""
-        envs: list[_FakeEnv] = []
-        runner_mod = _patch_play(monkeypatch, _make_env_factory(envs=envs))
+        model = _FakeModel()
+        runner_mod = _patch_play(monkeypatch, _make_env_factory(), model=model)
         config = _play_config(
             tmp_path, levels=("SuperMarioBros-1-1-v0",), sample_runs=1
         )
 
         runner_mod.play(config)
 
-        video_dir = tmp_path / "videos"
-        assert (video_dir / "1-1_0.198.mp4").exists()
-        assert not (video_dir / "1-1.mp4").exists(), "采样播放不该落成无后缀的名字"
-        assert envs[0].resets == 1
+        videos = list((tmp_path / "videos").glob("*.mp4"))
+        assert len(videos) == 1
+        name = videos[0].name
+        assert re.fullmatch(r"1-1_\d\.\d{3}\.mp4", name), f"名字应带探索率，实际 {name}"
+        # 名字里的数字必须就是这一遍实际用的值，不能各写各的
+        used = {f"{rate:.3f}" for rate in model.rates_used}
+        assert name.split("_", 1)[1].removesuffix(".mp4") in used
 
     def test_greedy_keeps_the_plain_filename(self, tmp_path: Path, monkeypatch):
         """贪心没有探索率可言，文件名维持 1-1.mp4。"""
@@ -451,39 +460,87 @@ class TestSampleRuns:
         assert _video_filename(None, env, float("nan")) == "1-1.mp4"
         assert _video_filename(None, env, 0.19761608882144843) == "1-1_0.198.mp4"
 
-    def test_runs_share_one_filename_and_the_last_wins(self, tmp_path: Path, monkeypatch):
-        """探索率是常数，N 遍因此同名，只有最后一遍留下来。
+    def test_each_run_draws_its_own_rate(self, tmp_path: Path, monkeypatch):
+        """N 遍抽 N 个不同的概率——这才是 --sample N 的意义所在。
 
-        这是文件名方案（带探索率、不带序号）的既定取舍，钉死它免得日后有人
-        误以为是覆盖 bug 而"修"出个序号后缀。
+        若改回"同一个 ε 重复 N 遍"，三遍的 rates_used 会全部相同，这里就会红。
         """
-        envs: list[_FakeEnv] = []
-        runner_mod = _patch_play(monkeypatch, _make_env_factory(envs=envs))
+        model = _FakeModel()
+        runner_mod = _patch_play(monkeypatch, _make_env_factory(), model=model)
         config = _play_config(
             tmp_path, levels=("SuperMarioBros-1-1-v0",), sample_runs=3
         )
 
         runner_mod.play(config)
 
-        video_dir = tmp_path / "videos"
-        videos = list(video_dir.glob("*.mp4"))
-        assert [p.name for p in videos] == ["1-1_0.198.mp4"], (
-            f"三遍应只留一个文件，实际 {[p.name for p in videos]}"
+        assert len(set(model.rates_used)) == 3, (
+            f"三遍该抽三个不同的探索率，实际用到 {set(model.rates_used)}"
         )
 
-    def test_warns_that_earlier_runs_are_overwritten(
-        self, tmp_path: Path, monkeypatch, caplog
-    ):
-        """覆盖是静默的数据丢失，必须有一条日志说明，否则像是视频丢了。"""
-        runner_mod = _patch_play(monkeypatch, _make_env_factory())
+    def test_each_run_keeps_its_own_video(self, tmp_path: Path, monkeypatch):
+        """三遍三个文件，一个都不能少——概率不同，文件名本就撞不上。"""
+        model = _FakeModel()
+        runner_mod = _patch_play(monkeypatch, _make_env_factory(), model=model)
         config = _play_config(
             tmp_path, levels=("SuperMarioBros-1-1-v0",), sample_runs=3
+        )
+
+        runner_mod.play(config)
+
+        videos = list((tmp_path / "videos").glob("*.mp4"))
+        assert len(videos) == 3, f"三遍应留三个文件，实际 {[p.name for p in videos]}"
+
+    def test_drawn_rate_stays_within_twice_the_checkpoint_rate(
+        self, tmp_path: Path, monkeypatch
+    ):
+        """抽样范围是 [0, 2×checkpoint 的探索率]，均值仍落在原值上。
+
+        上界不设的话，采样播放会系统性比模型本身"更随机"，看到的就不是这个
+        模型的水平了。
+        """
+        model = _FakeModel()
+        runner_mod = _patch_play(monkeypatch, _make_env_factory(), model=model)
+        config = _play_config(
+            tmp_path, levels=("SuperMarioBros-1-1-v0",), sample_runs=8
+        )
+
+        runner_mod.play(config)
+
+        assert model.rates_used, "应至少采样过一次"
+        assert all(0.0 <= rate <= 2 * 0.198 for rate in model.rates_used), (
+            f"抽样越界：{[r for r in model.rates_used if r > 0.396]}"
+        )
+        assert len(set(model.rates_used)) > 1, "每一遍都该是一个新的抽样值"
+
+    def test_zero_rate_warns_that_nothing_varies(self, tmp_path: Path, monkeypatch, caplog):
+        """探索率衰减到 0 的模型抽不出随机性，得说一声而不是静默地重播。"""
+        model = _FakeModel()
+        model.exploration_rate = 0.0
+        runner_mod = _patch_play(monkeypatch, _make_env_factory(), model=model)
+        config = _play_config(
+            tmp_path, levels=("SuperMarioBros-1-1-v0",), sample_runs=2
         )
 
         with caplog.at_level("WARNING"):
             runner_mod.play(config)
 
-        assert "只有最后一遍的视频会留下" in caplog.text
+        assert "抽不出任何随机性" in caplog.text
+
+    def test_missing_rate_warns_and_still_records(self, tmp_path: Path, monkeypatch, caplog):
+        """拿不到探索率（非 DQN 模型）时只告警，不能把录制备份丢掉。"""
+        model = _FakeModel()
+        model.exploration_rate = float("nan")
+        runner_mod = _patch_play(monkeypatch, _make_env_factory(), model=model)
+        config = _play_config(
+            tmp_path, levels=("SuperMarioBros-1-1-v0",), sample_runs=2
+        )
+
+        with caplog.at_level("WARNING"):
+            runner_mod.play(config)
+
+        assert "抽不出任何随机性" in caplog.text
+        # 文件名退化成了朴素名字，兜底要保证两遍都留得下来
+        assert len(list((tmp_path / "videos").glob("*.mp4"))) == 2
 
     def test_each_run_resets_the_same_env(self, tmp_path: Path, monkeypatch):
         """同一关的各遍复用同一个 env：建环境很贵，reset() 本来就会重开一局。"""
@@ -500,9 +557,10 @@ class TestSampleRuns:
         assert envs[0].closed
 
     def test_runs_apply_to_every_level(self, tmp_path: Path, monkeypatch):
-        """多关卡时，每一关都跑满 N 遍。"""
+        """多关卡时，每一关都跑满 N 遍，各抽各的。"""
+        model = _FakeModel()
         envs: list[_FakeEnv] = []
-        runner_mod = _patch_play(monkeypatch, _make_env_factory(envs=envs))
+        runner_mod = _patch_play(monkeypatch, _make_env_factory(envs=envs), model=model)
         config = _play_config(
             tmp_path,
             levels=("SuperMarioBros-1-1-v0", "SuperMarioBros-1-2-v0"),
@@ -511,9 +569,10 @@ class TestSampleRuns:
 
         runner_mod.play(config)
 
-        video_dir = tmp_path / "videos"
+        videos = list((tmp_path / "videos").glob("*.mp4"))
+        assert len(videos) == 4, f"两关各两遍应为 4 个文件，实际 {[p.name for p in videos]}"
         for level in ("1-1", "1-2"):
-            assert (video_dir / f"{level}_0.198.mp4").exists()
+            assert len([p for p in videos if p.name.startswith(f"{level}_")]) == 2
         assert len(envs) == 2, "每个关卡各建一个环境，关内各遍复用"
 
     def test_every_run_samples(self, tmp_path: Path, monkeypatch):
@@ -528,6 +587,24 @@ class TestSampleRuns:
 
         assert model.deterministic_calls, "应至少推理过一次"
         assert not any(model.deterministic_calls), "每一遍的每一步都该走 ε-greedy"
+
+
+class TestUniquePath:
+    """撞名兜底：两遍抽到同一个三位小数时，谁的录像都不能被覆盖掉。"""
+
+    def test_keeps_a_free_name(self, tmp_path: Path):
+        assert _unique_path(tmp_path, "1-1_0.198.mp4") == tmp_path / "1-1_0.198.mp4"
+
+    def test_steps_aside_when_the_name_is_taken(self, tmp_path: Path):
+        (tmp_path / "1-1_0.198.mp4").touch()
+
+        assert _unique_path(tmp_path, "1-1_0.198.mp4").name == "1-1_0.198_2.mp4"
+
+    def test_skips_past_several_taken_names(self, tmp_path: Path):
+        for name in ("1-1_0.198.mp4", "1-1_0.198_2.mp4", "1-1_0.198_3.mp4"):
+            (tmp_path / name).touch()
+
+        assert _unique_path(tmp_path, "1-1_0.198.mp4").name == "1-1_0.198_4.mp4"
 
 
 class TestSampleActions:
@@ -567,7 +644,9 @@ class TestSampleActions:
         with caplog.at_level("INFO"):
             runner_mod.play(config)
 
-        assert "0.198" in caplog.text, "应把实际的 exploration_rate 记录下来"
+        assert "0.198" in caplog.text, "应把作为均值的 exploration_rate 记录下来"
+        assert "0.396" in caplog.text, "抽样上界（2×均值）也要写出来"
+        assert "探索率=" in caplog.text, "每一遍实际用到多少，得逐遍记下来"
 
     def _make_load_reseeding_to_42(self, monkeypatch, runner_mod, model):
         """让假 DQN.load 复刻真实行为：按存档里的 seed 重播全局 numpy。

@@ -127,6 +127,52 @@ def _video_filename(level_name, env_config, exploration_rate=None) -> str:
     return f"{base}_{exploration_rate:.3f}.mp4"
 
 
+def _rate_label(exploration_rate) -> str:
+    """日志里的探索率写法；贪心播放没有探索率可说，写"贪心"而不是 nan。"""
+    if exploration_rate is None or not math.isfinite(exploration_rate):
+        return "贪心"
+    return f"{exploration_rate:.3f}"
+
+
+def _unique_path(directory: Path, filename: str) -> Path:
+    """给文件名让路，避免这一关的两遍互相覆盖。
+
+    每遍的探索率是各自抽的，正常不会重名；但文件名只保留三位小数，两遍抽到
+    同一个值的概率并非为零，而覆盖掉一整段录像连个痕迹都不会留下。撞名时加
+    _2、_3 往后顺延——这是意外情况的兜底，正常路径上文件名保持干净。
+    """
+    path = directory / filename
+    if not path.exists():
+        return path
+    stem, suffix = path.stem, path.suffix
+    idx = 2
+    while (candidate := directory / f"{stem}_{idx}{suffix}").exists():
+        idx += 1
+    return candidate
+
+
+def _has_exploration(base_rate) -> bool:
+    """这个探索率还有没有随机性可抽。
+
+    缺失（非 DQN 模型）与非正（已衰减到 0）都意味着抽多少次都是 0，分不出来，
+    调用方据此跳过取样、也别去改写模型。
+    """
+    return base_rate is not None and math.isfinite(base_rate) and base_rate > 0
+
+
+def _draw_exploration_rate(base_rate):
+    """给这一遍抽一个探索率：以 checkpoint 的值为均值，在 [0, 2×均值] 上均匀取。
+
+    范围对称地跨在均值两侧，均值因此还是 checkpoint 原本的强度——玩得多了整体
+    水平仍是这个模型的水准，不会一开采样就系统性地偏随机或偏贪心。
+
+    抽不出来时返回 None，调用方据此保留 checkpoint 原值。
+    """
+    if not _has_exploration(base_rate):
+        return None
+    return float(np.random.uniform(0.0, 2.0 * base_rate))
+
+
 def _reseed_for_sampling() -> None:
     """把随机性交还给操作系统熵，让每次播放的采样序列都不同。
 
@@ -161,9 +207,10 @@ def play(config: AppConfig, catch_interrupt: bool = True) -> None:
     新开一个目录，好让同一模型的多场播放能并排比较。用 ``--no-show`` 可只录制
     不弹窗；没有显示器的环境（服务器 / SSH）会自动走这个行为。
 
-    默认每关贪心地跑一遍。把 ``config.play.sample_runs`` 设成 N，则每关按
-    ε-greedy 采样跑 N 遍、各录一个视频——贪心配固定初始状态时每次播放都逐帧
-    相同，只有采样才能让轨迹分岔。
+    默认每关贪心地跑一遍。把 ``config.play.sample_runs`` 设成 N，则每关跑 N 遍，
+    每遍**各自抽一个探索率**再按 ε-greedy 采样动作，各录一个视频——贪心配固定
+    初始状态时每次播放都逐帧相同，只有采样才能让轨迹分岔；而拿同一个 ε 重复
+    N 遍，看到的只是同一场戏重放 N 次。
 
     停止方式：关掉显示窗口，或按 Ctrl+C——两者都会保住已录制的部分。
 
@@ -181,21 +228,13 @@ def play(config: AppConfig, catch_interrupt: bool = True) -> None:
     # 没开采样就是贪心地跑一遍；两者共用同一个循环，省得代码里到处分岔
     runs = sample_runs or 1
     deterministic = sample_runs == 0
-    if sample_runs > 1:
-        # 探索率是 checkpoint 上的常数，N 遍因此算出同一个文件名，只有最后一遍
-        # 的视频留得下来。这不是 bug 而是文件名方案的取舍，但不说清楚会让人以为
-        # 视频莫名其妙丢了
-        logger.warning(
-            "采样 %d 遍但文件名只带探索率、不带序号，只有最后一遍的视频会留下；"
-            "想逐遍留存就分几次运行，时间戳目录会把各次播放隔开", runs,
-        )
     base_dir = config.play.video_dir or (config.artifacts.save_root / "videos")
     # 训练侧自己按步数分好了目录，再来一层时间戳只是多余的套娃
     video_dir = _timestamped_dir(base_dir) if config.play.timestamp_videos else base_dir
     logger.info("视频输出目录: %s", video_dir)
     model = None
-    # 采样播放时才有值，既进日志也进视频文件名
-    exploration_rate = None
+    # 采样播放时才有值：checkpoint 自带的探索率，作为每遍抽样的均值
+    base_rate = None
     viewer = _open_viewer(config.play)
 
     try:
@@ -213,15 +252,20 @@ def play(config: AppConfig, catch_interrupt: bool = True) -> None:
                     # 必须在 load 之后：DQN.load 会拿存档里的 seed 重播 numpy，
                     # 在那之前重新播种等于没播
                     _reseed_for_sampling()
-                    # 采样强度完全由 checkpoint 里的探索率决定，可能是 0.02 也可能
-                    # 是训练中途的 1.0。打出来，免得画面糊了还以为是模型的问题
-                    exploration_rate = float(
-                        getattr(model, "exploration_rate", float("nan"))
-                    )
-                    logger.info(
-                        "按 ε-greedy 采样动作玩 %d 遍：exploration_rate=%.3f，每遍轨迹都不同",
-                        runs, exploration_rate,
-                    )
+                    # checkpoint 里的探索率是抽样的均值，可能是 0.02 也可能是训练
+                    # 中途的 1.0。打出来，免得画面糊了还以为是模型的问题
+                    base_rate = float(getattr(model, "exploration_rate", float("nan")))
+                    if not _has_exploration(base_rate):
+                        logger.warning(
+                            "checkpoint 的探索率是 %s（缺失或已衰减到 0），抽不出"
+                            "任何随机性，每遍都会退化成贪心、彼此逐帧相同", base_rate,
+                        )
+                    else:
+                        logger.info(
+                            "按 ε-greedy 采样动作玩 %d 遍：每遍在 [0, %.3f] 上"
+                            "各抽一个探索率（均值 %.3f），逐遍不同",
+                            runs, 2 * base_rate, base_rate,
+                        )
 
             level_label = level_name or f"世界{config.env.world}-{config.env.level}"
             logger.info(
@@ -234,8 +278,16 @@ def play(config: AppConfig, catch_interrupt: bool = True) -> None:
                 # 同一关的每一遍复用同一个 env：建一个马里奥环境要几百毫秒，
                 # 而 reset() 本来就会把游戏打回初始状态
                 for run_idx in range(1, runs + 1):
-                    video_path = video_dir / _video_filename(
-                        level_name, config.env, exploration_rate
+                    # 每遍现抽一个探索率并装回模型：DQN.predict 每次调用都现读
+                    # 这个属性，改写它就从下一帧起生效。抽不出来（模型没有可用
+                    # 的探索率）就照 checkpoint 原值播，不留空
+                    rate = _draw_exploration_rate(base_rate)
+                    if rate is None:
+                        rate = base_rate
+                    else:
+                        model.exploration_rate = rate
+                    video_path = _unique_path(
+                        video_dir, _video_filename(level_name, config.env, rate)
                     )
                     progress = f"（第 {run_idx}/{runs} 遍）" if runs > 1 else ""
                     state, _ = env.reset()
@@ -245,9 +297,11 @@ def play(config: AppConfig, catch_interrupt: bool = True) -> None:
                             deterministic=deterministic,
                         )
                         logger.info(
-                            "关卡 %s%s：步数=%d，奖励=%.1f，通关=%s，已录制 %d 帧 → %s",
-                            level_label, progress, step, total_reward, flag_get,
-                            recorder.frame_count, video_path,
+                            "关卡 %s%s：探索率=%s，步数=%d，奖励=%.1f，通关=%s，"
+                            "已录制 %d 帧 → %s",
+                            level_label, progress, _rate_label(rate), step,
+                            total_reward, flag_get, recorder.frame_count,
+                            video_path.name,
                         )
                     if viewer_closed:
                         break

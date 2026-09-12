@@ -114,7 +114,7 @@ python -m mad_mario.cli play [options]
 | Argument | Default | Description |
 | -------- | ------- | ----------- |
 | `--checkpoint` | *(auto)* | Checkpoint to load and play. Auto-discovery looks in `<save-root>/<compat>/` for the newest periodic checkpoint, falling back to `mario_dqn_final.zip`; playback errors out if neither exists |
-| `--sample [N]` | *(off)* | Play each level `N` times with ε-greedily sampled actions instead of the argmax, naming each video after the exploration rate used (`1-1_0.198.mp4`). Bare `--sample` means `N=1` |
+| `--sample [N]` | *(off)* | Play each level `N` times, drawing a fresh exploration rate for each run (uniform on `[0, 2×ε]`, mean = the checkpoint's ε) and sampling actions ε-greedily instead of taking the argmax. Each run's video is named after the rate it used (`1-1_0.137.mp4`). Bare `--sample` means `N=1` |
 | `--game` | `SuperMarioBros` | Gym environment game name |
 | `--world` | `1` | World / level pack number |
 | `--level` | `1` | Level number |
@@ -204,7 +204,7 @@ The directory is named after local start time (`YYYYMMDD_HHMMSS`); playing twice
 
 Every run records **the same playthrough**: playback takes the argmax action, and the emulator always resets Mario to the same starting state, so the same inputs produce the same trajectory frame for frame. Playing twice gives two byte-identical videos.
 
-`--sample N` is what breaks that tie — it plays each level `N` times, picking actions ε-greedily using the `exploration_rate` stored in the checkpoint:
+`--sample N` is what breaks that tie — it plays each level `N` times, and each of those runs draws its **own** exploration rate, uniformly from `[0, 2 × ε]` where `ε` is the rate stored in the checkpoint:
 
 ```bash
 python -m mad_mario.cli play --checkpoint <model.zip> --levels 1-1 --sample 3
@@ -212,18 +212,22 @@ python -m mad_mario.cli play --checkpoint <model.zip> --levels 1-1 --sample 3
 
 ```text
 <save-root>/videos/20260912_143022/
-  1-1_0.198.mp4     # 文件名里的 0.198 就是这次用的探索率
+  1-1_0.052.mp4     # 抽到 0.052，这三遍里最贪心的一遍
+  1-1_0.198.mp4     # 抽到 0.198 = checkpoint 原值，也就是均值
+  1-1_0.371.mp4     # 抽到 0.371，最随机的一遍
 ```
 
-A bare `--sample` means `--sample 1`. Greedy playback has no exploration rate to show, so it keeps the plain `1-1.mp4`; sampled playback stamps the rate it actually used into the filename, which is what makes an unusually wild clip traceable to a number rather than a mystery.
+The range is symmetric around the checkpoint's own rate, so its mean is that rate: playing many times shows you the model you actually have, rather than a systematically wilder or tamer one. Each run reassigns the rate on the loaded model before it plays, and playback logs every drawn value alongside the range, so an unusually wild clip is traceable to a number rather than a mystery.
 
-Note that the rate is a **constant** for a given checkpoint, so all `N` runs of a level compute the same filename and only the last one survives. Playing the level several times over separate commands is what keeps each playthrough — the timestamped directory separates them. Playback logs a warning when `N` is above 1 so a missing clip never looks like a lost file.
+A bare `--sample` means `--sample 1`. Greedy playback has no exploration rate to show, so it keeps the plain `1-1.mp4`. Two sampled runs only collide if they round to the same three decimals (about a 1% chance at `N=3`); when that happens the later run gets `_2` appended (`1-1_0.198_2.mp4`) instead of overwriting the earlier clip, which is exactly the kind of loss nobody would ever diagnose.
 
 The runs of one level share a single environment instance — it is reset between them, which is what makes each run a fresh game rather than a continuation.
 
-`--sample` also reseeds the random number generator from OS entropy after loading: a checkpoint carries the training `seed` (this repository's stores `42`), and `DQN.load` replays it, which would otherwise make separate runs sample the identical "random" sequence and produce byte-identical videos again.
+`--sample` also reseeds the random number generator from OS entropy after loading: a checkpoint carries the training `seed` (this repository's stores `42`), and `DQN.load` replays it, which would otherwise make separate runs draw the identical "random" rates and sample the identical sequence — producing byte-identical videos again.
 
-The sampling strength is whatever the checkpoint carries, which is a training artifact rather than a playback choice — this repository's model stores `0.198`, i.e. roughly one step in five is a random action. Playback logs the value it actually used, so an unusually wild video is traceable rather than mysterious. Episode length and reward vary as a result; in one real run two playthroughs of 1-1 ended at 36 and 38 steps. To see even more of them, raise `N` or run the command again — the timestamped directory keeps each batch from overwriting the last.
+The sampling strength comes from the checkpoint, which is a training artifact rather than a playback choice: this repository's model stores `0.198`, so each run samples uniformly from `[0, 0.396]`, i.e. somewhere between always taking the argmax and having roughly two steps in five be random. Episode length and reward vary as a result; in one real run two playthroughs of 1-1 ended at 36 and 38 steps. To see even more of them, raise `N` or run the command again — the timestamped directory keeps each batch from overwriting the last.
+
+A checkpoint whose exploration rate has decayed to `0` (or a model that carries no such rate at all) has nothing to draw from: playback logs a warning, and every run comes out greedy and identical.
 
 The window is paced at `--video-fps`, so what you watch matches the video's playback speed.
 
