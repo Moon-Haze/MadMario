@@ -98,11 +98,12 @@ class PlayConfig:
     # 视频再套一层时间戳目录，让每场播放各存一份、互不覆盖。训练侧录 best 模型
     # 时置 False：那边的 step_xxx 目录本身已经分好档了
     timestamp_videos: bool = True
-    # 按 ε-greedy 采样动作（用 checkpoint 里存下的 exploration_rate），而不是贪心
-    # 取最大 Q。默认关：默认行为该是"看这个模型最好的表现"。之所以需要它，是因为
-    # 贪心策略 + 固定初始状态意味着每次播放都逐帧相同，连跑几遍也看不到新东西；
-    # 只有引入动作随机性，轨迹才会真正分岔
-    sample_actions: bool = False
+    # 按 ε-greedy 采样动作（用 checkpoint 里存下的 exploration_rate）玩几遍，
+    # 而不是贪心取最大 Q。0 表示不采样：只贪心地播一遍，这是默认行为——默认该
+    # 是"看这个模型最好的表现"。之所以需要它，是因为贪心策略 + 固定初始状态
+    # 意味着每次播放都逐帧相同，连跑几遍也看不到新东西；只有引入动作随机性，
+    # 轨迹才会真正分岔，而且每遍都值得单独录下来
+    sample_runs: int = 0
 
 
 # ──────────────────────────────────────────────
@@ -460,8 +461,11 @@ def add_train_args(parser: argparse.ArgumentParser) -> None:
 
 def add_play_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--checkpoint", type=Path, default=None, help="要播放的 checkpoint")
-    parser.add_argument("--sample", dest="sample_actions", action="store_true",
-                        help="按 ε-greedy 采样动作，每跑一次都能看到不同打法")
+    # nargs="?"：裸写 --sample 等价于 --sample 1，老用法不至于失效；
+    # default=None 才能把"没传"和"--sample 0"区分开
+    parser.add_argument("--sample", type=int, nargs="?", const=1, default=None,
+                        metavar="N",
+                        help="按 ε-greedy 采样动作玩 N 遍，每遍各录一个视频（默认 1 遍）")
     parser.add_argument("--game", type=str, default=EnvConfig.game, help="游戏名称")
     parser.add_argument("--world", type=int, default=EnvConfig.world, help="世界/大关")
     parser.add_argument("--level", type=int, default=EnvConfig.level, help="关卡")
@@ -608,6 +612,7 @@ def config_from_play_args(args) -> AppConfig:
             video_dir=args.video_dir,
             video_fps=max(1, args.video_fps),
             show=args.show,
-            sample_actions=args.sample_actions,
+            # 没传就是 0（贪心一遍）；传了则至少 1 遍，"一遍都不采样"没有意义
+            sample_runs=0 if args.sample is None else max(1, args.sample),
         ),
     )

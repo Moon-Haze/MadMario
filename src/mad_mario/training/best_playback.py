@@ -44,7 +44,7 @@ def _to_playback_config(train_config: AppConfig, best_model_path: Path, video_di
             # 目录已按步数分好档，再套时间戳只会让路径变长而不多出任何信息
             timestamp_videos=False,
             # 这里要展示的是这个最优模型的最好表现，贪心；采样留给命令行播放
-            sample_actions=False,
+            sample_runs=0,
         ),
     )
 

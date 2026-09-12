@@ -102,10 +102,12 @@ class _FakeEnv:
         self.n_steps = n_steps
         self.interrupt_at = interrupt_at
         self.closed = False
+        self.resets = 0
         self._step = 0
 
     def reset(self):
         self._step = 0
+        self.resets += 1
         return np.zeros((4, 84, 84), dtype=np.uint8), {}
 
     def render(self):
@@ -156,13 +158,14 @@ def _play_config(
     video_dir: Path | None = None,
     show: bool = False,
     timestamp_videos: bool = False,
-    sample_actions: bool = False,
+    sample_runs: int = 0,
 ):
     """构造 play() 需要的最小配置，并落下 checkpoint 文件让存在性检查通过。
 
     show 默认 False：录制相关的测试不该顺带拉起 matplotlib。
     timestamp_videos 默认 False：多数测试关心的是"哪个关卡落到哪个文件"，直接
     断言平铺路径最清楚；时间戳目录本身另有专门的测试覆盖。
+    sample_runs 默认 0：贪心地跑一遍，与不传 --sample 时一致。
     """
     checkpoint = tmp_path / "model.zip"
     checkpoint.touch()
@@ -174,7 +177,7 @@ def _play_config(
             video_fps=15,
             show=show,
             timestamp_videos=timestamp_videos,
-            sample_actions=sample_actions,
+            sample_runs=sample_runs,
         ),
     )
 
@@ -408,6 +411,83 @@ class TestTimestampedVideoDir:
         assert (_only_subdir(tmp_path / "videos") / "1-1.mp4").exists()
 
 
+class TestSampleRuns:
+    """--sample N：每关按 ε-greedy 采样玩 N 遍，一遍一个视频。"""
+
+    def test_one_run_keeps_the_plain_filename(self, tmp_path: Path, monkeypatch):
+        """只跑一遍时不加后缀，免得给现有用法平添麻烦。"""
+        envs: list[_FakeEnv] = []
+        runner_mod = _patch_play(monkeypatch, _make_env_factory(envs=envs))
+        config = _play_config(
+            tmp_path, levels=("SuperMarioBros-1-1-v0",), sample_runs=1
+        )
+
+        runner_mod.play(config)
+
+        video_dir = tmp_path / "videos"
+        assert (video_dir / "1-1.mp4").exists()
+        assert not (video_dir / "1-1_run1.mp4").exists(), "单遍不该带后缀"
+        assert envs[0].resets == 1
+
+    def test_records_one_video_per_run(self, tmp_path: Path, monkeypatch):
+        """N 遍就要落 N 个文件——否则后一遍会覆盖前一遍。"""
+        envs: list[_FakeEnv] = []
+        runner_mod = _patch_play(monkeypatch, _make_env_factory(envs=envs))
+        config = _play_config(
+            tmp_path, levels=("SuperMarioBros-1-1-v0",), sample_runs=3
+        )
+
+        runner_mod.play(config)
+
+        video_dir = tmp_path / "videos"
+        for idx in (1, 2, 3):
+            assert (video_dir / f"1-1_run{idx}.mp4").exists(), f"缺第 {idx} 遍的视频"
+        assert not (video_dir / "1-1.mp4").exists(), "多遍时不该再有无后缀的文件"
+
+    def test_each_run_resets_the_same_env(self, tmp_path: Path, monkeypatch):
+        """同一关的各遍复用同一个 env：建环境很贵，reset() 本来就会重开一局。"""
+        envs: list[_FakeEnv] = []
+        runner_mod = _patch_play(monkeypatch, _make_env_factory(envs=envs))
+        config = _play_config(
+            tmp_path, levels=("SuperMarioBros-1-1-v0",), sample_runs=3
+        )
+
+        runner_mod.play(config)
+
+        assert len(envs) == 1, "一个关卡只该建一个环境"
+        assert envs[0].resets == 3, "每遍开始都要 reset"
+        assert envs[0].closed
+
+    def test_runs_apply_to_every_level(self, tmp_path: Path, monkeypatch):
+        """多关卡时，每一关都跑满 N 遍。"""
+        runner_mod = _patch_play(monkeypatch, _make_env_factory())
+        config = _play_config(
+            tmp_path,
+            levels=("SuperMarioBros-1-1-v0", "SuperMarioBros-1-2-v0"),
+            sample_runs=2,
+        )
+
+        runner_mod.play(config)
+
+        video_dir = tmp_path / "videos"
+        for level in ("1-1", "1-2"):
+            for idx in (1, 2):
+                assert (video_dir / f"{level}_run{idx}.mp4").exists()
+
+    def test_every_run_samples(self, tmp_path: Path, monkeypatch):
+        """N 遍都得走采样，不能只有第一遍采样、后面退回贪心。"""
+        model = _FakeModel()
+        runner_mod = _patch_play(monkeypatch, _make_env_factory(), model=model)
+        config = _play_config(
+            tmp_path, levels=("SuperMarioBros-1-1-v0",), sample_runs=3
+        )
+
+        runner_mod.play(config)
+
+        assert model.deterministic_calls, "应至少推理过一次"
+        assert not any(model.deterministic_calls), "每一遍的每一步都该走 ε-greedy"
+
+
 class TestSampleActions:
     """--sample：贪心策略配固定初始状态时每次播放都逐帧相同，采样才会走出新轨迹。"""
 
@@ -427,7 +507,7 @@ class TestSampleActions:
         model = _FakeModel()
         runner_mod = _patch_play(monkeypatch, _make_env_factory(), model=model)
         config = _play_config(
-            tmp_path, levels=("SuperMarioBros-1-1-v0",), sample_actions=True
+            tmp_path, levels=("SuperMarioBros-1-1-v0",), sample_runs=1
         )
 
         runner_mod.play(config)
@@ -439,7 +519,7 @@ class TestSampleActions:
         """采样强度取决于 checkpoint 里的探索率，可能是 1.0；不写出来没法排查。"""
         runner_mod = _patch_play(monkeypatch, _make_env_factory())
         config = _play_config(
-            tmp_path, levels=("SuperMarioBros-1-1-v0",), sample_actions=True
+            tmp_path, levels=("SuperMarioBros-1-1-v0",), sample_runs=1
         )
 
         with caplog.at_level("INFO"):
@@ -471,7 +551,7 @@ class TestSampleActions:
         runner_mod = _patch_play(monkeypatch, _make_env_factory(), model=model)
         self._make_load_reseeding_to_42(monkeypatch, runner_mod, model)
         config = _play_config(
-            tmp_path, levels=("SuperMarioBros-1-1-v0",), sample_actions=True
+            tmp_path, levels=("SuperMarioBros-1-1-v0",), sample_runs=1
         )
 
         runner_mod.play(config)

@@ -114,7 +114,7 @@ python -m mad_mario.cli play [options]
 | Argument | Default | Description |
 | -------- | ------- | ----------- |
 | `--checkpoint` | *(auto)* | Checkpoint to load and play. Auto-discovery looks in `<save-root>/<compat>/` for the newest periodic checkpoint, falling back to `mario_dqn_final.zip`; playback errors out if neither exists |
-| `--sample` | *(flag)* | Pick actions ε-greedily instead of taking the argmax, so each run diverges |
+| `--sample [N]` | *(off)* | Play each level `N` times with ε-greedily sampled actions instead of the argmax, recording one video per run (`1-1_run1.mp4`…). Bare `--sample` means `N=1` |
 | `--game` | `SuperMarioBros` | Gym environment game name |
 | `--world` | `1` | World / level pack number |
 | `--level` | `1` | Level number |
@@ -204,15 +204,24 @@ The directory is named after local start time (`YYYYMMDD_HHMMSS`); playing twice
 
 Every run records **the same playthrough**: playback takes the argmax action, and the emulator always resets Mario to the same starting state, so the same inputs produce the same trajectory frame for frame. Playing twice gives two byte-identical videos.
 
-`--sample` is what breaks that tie — it picks actions ε-greedily using the `exploration_rate` stored in the checkpoint, so each run diverges. It also reseeds the random number generator from OS entropy after loading: a checkpoint carries the training `seed` (this repository's stores `42`), and `DQN.load` replays it, which would otherwise make two separate runs sample the identical "random" sequence and produce byte-identical videos again:
+`--sample N` is what breaks that tie — it plays each level `N` times, picking actions ε-greedily using the `exploration_rate` stored in the checkpoint, and records one video per run:
 
 ```bash
-python -m mad_mario.cli play --checkpoint <model.zip> --levels 1-1 --sample
+python -m mad_mario.cli play --checkpoint <model.zip> --levels 1-1 --sample 3
 ```
 
-Run the command again for another playthrough; the timestamped directory keeps them from overwriting each other.
+```text
+<save-root>/videos/20260912_143022/
+  1-1_run1.mp4      # 同一个模型，三种打法
+  1-1_run2.mp4
+  1-1_run3.mp4
+```
 
-The sampling strength is whatever the checkpoint carries, which is a training artifact rather than a playback choice — this repository's model stores `0.198`, i.e. roughly one step in five is a random action. Playback logs the value it actually used, so an unusually wild video is traceable rather than mysterious. Episode length and reward vary as a result; in one real run two playthroughs of 1-1 ended at 36 and 38 steps.
+A bare `--sample` means `--sample 1`; the `_runN` suffix only appears when `N` is above 1, so single-run filenames stay plain. The runs of one level share a single environment instance — it is reset between them, which is what makes each run a fresh game rather than a continuation.
+
+`--sample` also reseeds the random number generator from OS entropy after loading: a checkpoint carries the training `seed` (this repository's stores `42`), and `DQN.load` replays it, which would otherwise make separate runs sample the identical "random" sequence and produce byte-identical videos again.
+
+The sampling strength is whatever the checkpoint carries, which is a training artifact rather than a playback choice — this repository's model stores `0.198`, i.e. roughly one step in five is a random action. Playback logs the value it actually used, so an unusually wild video is traceable rather than mysterious. Episode length and reward vary as a result; in one real run two playthroughs of 1-1 ended at 36 and 38 steps. To see even more of them, raise `N` or run the command again — the timestamped directory keeps each batch from overwriting the last.
 
 The window is paced at `--video-fps`, so what you watch matches the video's playback speed.
 

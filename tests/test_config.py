@@ -474,20 +474,36 @@ class TestPlayConfig:
         config = config_from_train_args(args)
         assert config.play.play_on_best is True
 
-    def test_sample_actions_defaults_to_off(self):
-        # 默认贪心：不该因为新增开关就把"看模型最好表现"这个默认语义改掉
+    def test_sample_runs_defaults_to_zero(self):
+        # 0 = 不采样、只贪心播一遍。不该因为新增开关就把"看模型最好表现"改掉
         parser = argparse.ArgumentParser()
         add_play_args(parser)
         args = parser.parse_args([])
         config = config_from_play_args(args)
-        assert config.play.sample_actions is False
+        assert config.play.sample_runs == 0
 
-    def test_sample_flag_maps_to_play_config(self):
+    def test_bare_sample_flag_means_one_run(self):
+        # 裸写 --sample 等价于 --sample 1，老用法不至于失效
         parser = argparse.ArgumentParser()
         add_play_args(parser)
         args = parser.parse_args(["--sample"])
         config = config_from_play_args(args)
-        assert config.play.sample_actions is True
+        assert config.play.sample_runs == 1
+
+    def test_sample_takes_a_number(self):
+        parser = argparse.ArgumentParser()
+        add_play_args(parser)
+        args = parser.parse_args(["--sample", "3"])
+        config = config_from_play_args(args)
+        assert config.play.sample_runs == 3
+
+    def test_sample_clamped_to_one(self):
+        # "一遍都不采样"没有意义，下限钳制为 1（与 --video-fps 的钳制同理）
+        parser = argparse.ArgumentParser()
+        add_play_args(parser)
+        args = parser.parse_args(["--sample", "0"])
+        config = config_from_play_args(args)
+        assert config.play.sample_runs == 1
 
     def test_no_play_best_flag(self):
         parser = argparse.ArgumentParser()

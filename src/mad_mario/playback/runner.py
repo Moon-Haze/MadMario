@@ -113,6 +113,16 @@ def _run_episode(env, model, recorder, state, viewer=None, deterministic=True):
     return total_reward, step, flag_get, False
 
 
+def _video_filename(level_name, env_config, run_idx: int, runs: int) -> str:
+    """关卡视频文件名。
+
+    只跑一遍时用 1-1.mp4 这样的干净名字，采样多遍时带 _runN 后缀——否则后一遍
+    会把前一遍覆盖掉，而"每遍都不一样"正是要多跑几遍的全部意义。
+    """
+    base = _level_short_name(level_name, env_config)
+    return f"{base}.mp4" if runs == 1 else f"{base}_run{run_idx}.mp4"
+
+
 def _reseed_for_sampling() -> None:
     """把随机性交还给操作系统熵，让每次播放的采样序列都不同。
 
@@ -147,9 +157,9 @@ def play(config: AppConfig, catch_interrupt: bool = True) -> None:
     新开一个目录，好让同一模型的多场播放能并排比较。用 ``--no-show`` 可只录制
     不弹窗；没有显示器的环境（服务器 / SSH）会自动走这个行为。
 
-    每关只跑一个回合，走贪心策略。想让每次播放走出不同轨迹，开
-    ``config.play.sample_actions``；想多看几种打法就多跑几次命令，时间戳目录
-    天然把各次播放隔开。
+    默认每关贪心地跑一遍。把 ``config.play.sample_runs`` 设成 N，则每关按
+    ε-greedy 采样跑 N 遍、各录一个视频——贪心配固定初始状态时每次播放都逐帧
+    相同，只有采样才能让轨迹分岔。
 
     停止方式：关掉显示窗口，或按 Ctrl+C——两者都会保住已录制的部分。
 
@@ -163,7 +173,10 @@ def play(config: AppConfig, catch_interrupt: bool = True) -> None:
         return
 
     levels = config.env.levels or [None]
-    sample_actions = config.play.sample_actions
+    sample_runs = config.play.sample_runs
+    # 没开采样就是贪心地跑一遍；两者共用同一个循环，省得代码里到处分岔
+    runs = sample_runs or 1
+    deterministic = sample_runs == 0
     base_dir = config.play.video_dir or (config.artifacts.save_root / "videos")
     # 训练侧自己按步数分好了目录，再来一层时间戳只是多余的套娃
     video_dir = _timestamped_dir(base_dir) if config.play.timestamp_videos else base_dir
@@ -182,37 +195,45 @@ def play(config: AppConfig, catch_interrupt: bool = True) -> None:
                 logger.info(f"正在加载 checkpoint: {checkpoint_path}")
                 model = DQN.load(str(checkpoint_path), device="auto")
                 logger.info(f"模型已加载。已训练步数: {model.num_timesteps}")
-                if sample_actions:
+                if sample_runs:
                     # 必须在 load 之后：DQN.load 会拿存档里的 seed 重播 numpy，
                     # 在那之前重新播种等于没播
                     _reseed_for_sampling()
                     # 采样强度完全由 checkpoint 里的探索率决定，可能是 0.02 也可能
                     # 是训练中途的 1.0。打出来，免得画面糊了还以为是模型的问题
                     logger.info(
-                        "按 ε-greedy 采样动作：exploration_rate=%.3f，每次播放轨迹都不同",
-                        getattr(model, "exploration_rate", float("nan")),
+                        "按 ε-greedy 采样动作玩 %d 遍：exploration_rate=%.3f，每遍轨迹都不同",
+                        runs, getattr(model, "exploration_rate", float("nan")),
                     )
 
             level_label = level_name or f"世界{config.env.world}-{config.env.level}"
-            video_path = video_dir / f"{_level_short_name(level_name, config.env)}.mp4"
             logger.info(
-                "=== 播放关卡 %s（%d/%d）→ %s ===",
-                level_label, level_idx, len(levels), video_path,
+                "=== 播放关卡 %s（%d/%d），共 %d 遍 → %s ===",
+                level_label, level_idx, len(levels), runs, video_dir,
             )
 
             viewer_closed = False
             try:
-                state, _ = env.reset()
-                with VideoRecorder(video_path, fps=config.play.video_fps) as recorder:
-                    total_reward, step, flag_get, viewer_closed = _run_episode(
-                        env, model, recorder, state, viewer,
-                        deterministic=not sample_actions,
+                # 同一关的每一遍复用同一个 env：建一个马里奥环境要几百毫秒，
+                # 而 reset() 本来就会把游戏打回初始状态
+                for run_idx in range(1, runs + 1):
+                    video_path = video_dir / _video_filename(
+                        level_name, config.env, run_idx, runs
                     )
-                    logger.info(
-                        "关卡 %s：步数=%d，奖励=%.1f，通关=%s，已录制 %d 帧 → %s",
-                        level_label, step, total_reward, flag_get,
-                        recorder.frame_count, video_path,
-                    )
+                    progress = f"（第 {run_idx}/{runs} 遍）" if runs > 1 else ""
+                    state, _ = env.reset()
+                    with VideoRecorder(video_path, fps=config.play.video_fps) as recorder:
+                        total_reward, step, flag_get, viewer_closed = _run_episode(
+                            env, model, recorder, state, viewer,
+                            deterministic=deterministic,
+                        )
+                        logger.info(
+                            "关卡 %s%s：步数=%d，奖励=%.1f，通关=%s，已录制 %d 帧 → %s",
+                            level_label, progress, step, total_reward, flag_get,
+                            recorder.frame_count, video_path,
+                        )
+                    if viewer_closed:
+                        break
             finally:
                 env.close()
 
