@@ -96,12 +96,10 @@ class _FakeEnv:
         self.n_steps = n_steps
         self.interrupt_at = interrupt_at
         self.closed = False
-        self.resets = 0
         self._step = 0
 
     def reset(self):
         self._step = 0
-        self.resets += 1
         return np.zeros((4, 84, 84), dtype=np.uint8), {}
 
     def render(self):
@@ -152,7 +150,6 @@ def _play_config(
     video_dir: Path | None = None,
     show: bool = False,
     timestamp_videos: bool = False,
-    episodes: int = 1,
     sample_actions: bool = False,
 ):
     """构造 play() 需要的最小配置，并落下 checkpoint 文件让存在性检查通过。
@@ -160,7 +157,6 @@ def _play_config(
     show 默认 False：录制相关的测试不该顺带拉起 matplotlib。
     timestamp_videos 默认 False：多数测试关心的是"哪个关卡落到哪个文件"，直接
     断言平铺路径最清楚；时间戳目录本身另有专门的测试覆盖。
-    episodes 默认 1：单回合是默认路径，多回合的行为另有一组测试。
     """
     checkpoint = tmp_path / "model.zip"
     checkpoint.touch()
@@ -172,7 +168,6 @@ def _play_config(
             video_fps=15,
             show=show,
             timestamp_videos=timestamp_videos,
-            episodes=episodes,
             sample_actions=sample_actions,
         ),
     )
@@ -407,85 +402,8 @@ class TestTimestampedVideoDir:
         assert (_only_subdir(tmp_path / "videos") / "1-1.mp4").exists()
 
 
-class TestPlayEpisodes:
-    """--episodes 的接线：此前这个参数解析了却从没人读，每关固定只跑一回合。"""
-
-    def test_single_episode_keeps_plain_filename(self, tmp_path: Path, monkeypatch):
-        """默认单回合时文件名不带序号——绝大多数播放都走这条路。"""
-        runner_mod = _patch_play(monkeypatch, _make_env_factory())
-        config = _play_config(tmp_path, levels=("SuperMarioBros-1-1-v0",), episodes=1)
-
-        runner_mod.play(config)
-
-        assert (tmp_path / "videos" / "1-1.mp4").exists()
-        assert not (tmp_path / "videos" / "1-1_ep1.mp4").exists()
-
-    def test_multiple_episodes_get_numbered_files(self, tmp_path: Path, monkeypatch):
-        """多回合必须各存各的，否则后一回合会把前一回合覆盖掉。"""
-        runner_mod = _patch_play(monkeypatch, _make_env_factory())
-        config = _play_config(tmp_path, levels=("SuperMarioBros-1-1-v0",), episodes=3)
-
-        runner_mod.play(config)
-
-        video_dir = tmp_path / "videos"
-        for episode in (1, 2, 3):
-            assert (video_dir / f"1-1_ep{episode}.mp4").exists(), f"缺第 {episode} 回合"
-        assert not (video_dir / "1-1.mp4").exists(), "带序号时不该再有无序号的那份"
-
-    def test_every_level_gets_every_episode(self, tmp_path: Path, monkeypatch):
-        """关卡与回合是两层循环，两关两回合应产出四个文件。"""
-        runner_mod = _patch_play(monkeypatch, _make_env_factory())
-        config = _play_config(
-            tmp_path, levels=("SuperMarioBros-1-1-v0", "SuperMarioBros-1-2-v0"), episodes=2
-        )
-
-        runner_mod.play(config)
-
-        video_dir = tmp_path / "videos"
-        expected = {f"{level}_ep{ep}.mp4" for level in ("1-1", "1-2") for ep in (1, 2)}
-        assert {p.name for p in video_dir.iterdir()} == expected
-
-    def test_episodes_reuse_one_env_per_level(self, tmp_path: Path, monkeypatch):
-        """多回合只是重置，不该每回合重建环境——重建会白付一次启动开销。"""
-        envs: list[_FakeEnv] = []
-        runner_mod = _patch_play(monkeypatch, _make_env_factory(envs=envs))
-        config = _play_config(tmp_path, levels=("SuperMarioBros-1-1-v0",), episodes=3)
-
-        runner_mod.play(config)
-
-        assert len(envs) == 1, "一个关卡只该建一个环境"
-        assert envs[0].resets == 3, "每个回合重置一次"
-        assert envs[0].closed, "整关跑完仍要关掉环境"
-
-    def test_window_close_stops_remaining_episodes(self, tmp_path: Path, monkeypatch):
-        """关窗即停止：剩下的回合与关卡都不该再跑，已录的保留。"""
-        viewers: list[_FakeViewer] = []
-
-        def _make_viewer(fps, *args, **kwargs):
-            viewer = _FakeViewer(fps, close_after=1)
-            viewers.append(viewer)
-            return viewer
-
-        runner_mod = _patch_play(monkeypatch, _make_env_factory())
-        monkeypatch.setattr(runner_mod, "FrameViewer", _make_viewer)
-        monkeypatch.setattr(runner_mod, "is_gui_available", lambda: True)
-        config = _play_config(
-            tmp_path,
-            levels=("SuperMarioBros-1-1-v0", "SuperMarioBros-1-2-v0"),
-            episodes=2,
-            show=True,
-        )
-
-        runner_mod.play(config)
-
-        video_dir = tmp_path / "videos"
-        assert (video_dir / "1-1_ep1.mp4").exists(), "关窗前已录的帧必须落盘"
-        assert not (video_dir / "1-1_ep2.mp4").exists(), "关窗后不该再开下一回合"
-        assert not (video_dir / "1-2_ep1.mp4").exists(), "关窗后不该再开下一关"
-
-
 class TestSampleActions:
-    """--sample：贪心策略配固定初始状态时每回合都是重放，采样才能走出不同轨迹。"""
+    """--sample：贪心策略配固定初始状态时每次播放都逐帧相同，采样才会走出新轨迹。"""
 
     def test_defaults_to_greedy(self, tmp_path: Path, monkeypatch):
         """默认必须还是看这个模型最好的表现，不能被采样悄悄改掉。"""
@@ -522,18 +440,6 @@ class TestSampleActions:
             runner_mod.play(config)
 
         assert "0.198" in caplog.text, "应把实际的 exploration_rate 记录下来"
-
-    def test_applies_to_every_episode(self, tmp_path: Path, monkeypatch):
-        """多回合配采样，每个回合都该是采样的。"""
-        model = _FakeModel()
-        runner_mod = _patch_play(monkeypatch, _make_env_factory(), model=model)
-        config = _play_config(
-            tmp_path, levels=("SuperMarioBros-1-1-v0",), episodes=3, sample_actions=True
-        )
-
-        runner_mod.play(config)
-
-        assert not any(model.deterministic_calls)
 
 
 class TestPlayViewer:

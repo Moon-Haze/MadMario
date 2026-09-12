@@ -474,29 +474,6 @@ class TestPlayConfig:
         config = config_from_train_args(args)
         assert config.play.play_on_best is True
 
-    def test_episodes_defaults_to_one(self):
-        parser = argparse.ArgumentParser()
-        add_play_args(parser)
-        args = parser.parse_args([])
-        config = config_from_play_args(args)
-        assert config.play.episodes == 1
-
-    def test_episodes_flag_maps_to_play_config(self):
-        # 此前 --episodes 解析了却没人读；这里钉住它确实落到配置上
-        parser = argparse.ArgumentParser()
-        add_play_args(parser)
-        args = parser.parse_args(["--episodes", "3"])
-        config = config_from_play_args(args)
-        assert config.play.episodes == 3
-
-    def test_episodes_clamped_to_one(self):
-        # 0 或负数等于一回合都不跑，钳到 1
-        parser = argparse.ArgumentParser()
-        add_play_args(parser)
-        args = parser.parse_args(["--episodes", "0"])
-        config = config_from_play_args(args)
-        assert config.play.episodes == 1
-
     def test_sample_actions_defaults_to_off(self):
         # 默认贪心：不该因为新增开关就把"看模型最好表现"这个默认语义改掉
         parser = argparse.ArgumentParser()

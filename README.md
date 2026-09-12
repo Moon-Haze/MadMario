@@ -114,8 +114,7 @@ python -m mad_mario.cli play [options]
 | Argument | Default | Description |
 | -------- | ------- | ----------- |
 | `--checkpoint` | *(auto)* | Checkpoint to load and play. Auto-discovery looks in `<save-root>/<compat>/` for the newest periodic checkpoint, falling back to `mario_dqn_final.zip`; playback errors out if neither exists |
-| `--episodes` | `1` | Episodes to play per level; values above 1 append `_epN` to the video filenames so runs do not overwrite each other |
-| `--sample` | *(flag)* | Pick actions ε-greedily instead of taking the argmax, so episodes diverge; combine with `--episodes` to see several different playthroughs |
+| `--sample` | *(flag)* | Pick actions ε-greedily instead of taking the argmax, so each run diverges |
 | `--game` | `SuperMarioBros` | Gym environment game name |
 | `--world` | `1` | World / level pack number |
 | `--level` | `1` | Level number |
@@ -203,15 +202,17 @@ Playback shows the game in a window while recording it: each level gets its own 
 
 The directory is named after local start time (`YYYYMMDD_HHMMSS`); playing twice within the same second appends a counter (`20260912_143022_2`) rather than sharing a directory. `--video-dir` only changes where the parent goes — the timestamped directory is still created inside it.
 
-`--episodes N` runs each level `N` times and records each run, appending an `_epN` suffix so the later runs do not overwrite the first (`1-1_ep1.mp4`, `1-1_ep2.mp4`, …). With the default of `1` the filenames stay plain (`1-1.mp4`).
+Every run records **the same playthrough**: playback takes the argmax action, and the emulator always resets Mario to the same starting state, so the same inputs produce the same trajectory frame for frame. Playing twice gives two byte-identical videos.
 
-By default those episodes are **byte-identical replays**: playback takes the argmax action, and the emulator always resets Mario to the same starting state, so the same inputs produce the same trajectory frame for frame. `--sample` is what breaks the tie — it picks actions ε-greedily using the `exploration_rate` stored in the checkpoint, so episodes diverge:
+`--sample` is what breaks that tie — it picks actions ε-greedily using the `exploration_rate` stored in the checkpoint, so each run diverges:
 
 ```bash
-python -m mad_mario.cli play --checkpoint <model.zip> --levels 1-1 --episodes 3 --sample
+python -m mad_mario.cli play --checkpoint <model.zip> --levels 1-1 --sample
 ```
 
-The sampling strength is whatever the checkpoint carries, which is a training artifact rather than a playback choice — this repository's model stores `0.198`, i.e. roughly one step in five is a random action. Playback logs the value it actually used, so an unusually wild video is traceable rather than mysterious. Episode length and reward vary as a result; in one real run the three episodes ended at 34, 34 and 318 steps.
+Run the command again for another playthrough; the timestamped directory keeps them from overwriting each other.
+
+The sampling strength is whatever the checkpoint carries, which is a training artifact rather than a playback choice — this repository's model stores `0.198`, i.e. roughly one step in five is a random action. Playback logs the value it actually used, so an unusually wild video is traceable rather than mysterious. Episode length and reward vary as a result; in one real run two playthroughs of 1-1 ended at 36 and 38 steps.
 
 The window is paced at `--video-fps`, so what you watch matches the video's playback speed.
 
