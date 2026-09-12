@@ -497,6 +497,21 @@ class TestPlayConfig:
         config = config_from_play_args(args)
         assert config.play.episodes == 1
 
+    def test_sample_actions_defaults_to_off(self):
+        # 默认贪心：不该因为新增开关就把"看模型最好表现"这个默认语义改掉
+        parser = argparse.ArgumentParser()
+        add_play_args(parser)
+        args = parser.parse_args([])
+        config = config_from_play_args(args)
+        assert config.play.sample_actions is False
+
+    def test_sample_flag_maps_to_play_config(self):
+        parser = argparse.ArgumentParser()
+        add_play_args(parser)
+        args = parser.parse_args(["--sample"])
+        config = config_from_play_args(args)
+        assert config.play.sample_actions is True
+
     def test_no_play_best_flag(self):
         parser = argparse.ArgumentParser()
         add_train_args(parser)

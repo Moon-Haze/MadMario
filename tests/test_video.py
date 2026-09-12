@@ -68,11 +68,20 @@ class TestVideoRecorder:
 
 
 class _FakeModel:
-    """只提供 play() 用到的那两个成员。"""
+    """只提供 play() 用到的那几个成员。
+
+    deterministic_calls 记下每次推理传进来的 deterministic，用来验证
+    --sample 确实改的是推理方式，而不只是改了个配置字段。
+    """
 
     num_timesteps = 1234
+    exploration_rate = 0.198
+
+    def __init__(self):
+        self.deterministic_calls: list[bool] = []
 
     def predict(self, state, deterministic=True):
+        self.deterministic_calls.append(deterministic)
         return 1, None
 
 
@@ -144,6 +153,7 @@ def _play_config(
     show: bool = False,
     timestamp_videos: bool = False,
     episodes: int = 1,
+    sample_actions: bool = False,
 ):
     """构造 play() 需要的最小配置，并落下 checkpoint 文件让存在性检查通过。
 
@@ -163,6 +173,7 @@ def _play_config(
             show=show,
             timestamp_videos=timestamp_videos,
             episodes=episodes,
+            sample_actions=sample_actions,
         ),
     )
 
@@ -200,15 +211,17 @@ def _make_env_factory(
     return _factory
 
 
-def _patch_play(monkeypatch, env_factory):
+def _patch_play(monkeypatch, env_factory, model: _FakeModel | None = None):
     """把 play() 的模型加载与环境创建都换成假的。
 
     补丁打在 playback.runner 上而不是 cli 上：play() 实现住在 runner 里，
     cli 只是转发调用，改 cli 的属性影响不到真正的执行路径。
+    传 model 可拿到同一个假模型实例，用于断言推理方式。
     """
     import mad_mario.playback.runner as runner_mod
 
-    monkeypatch.setattr(runner_mod, "DQN", SimpleNamespace(load=lambda *a, **k: _FakeModel()))
+    model = _FakeModel() if model is None else model
+    monkeypatch.setattr(runner_mod, "DQN", SimpleNamespace(load=lambda *a, **k: model))
     monkeypatch.setattr(runner_mod, "make_mario_env", env_factory)
     return runner_mod
 
@@ -469,6 +482,58 @@ class TestPlayEpisodes:
         assert (video_dir / "1-1_ep1.mp4").exists(), "关窗前已录的帧必须落盘"
         assert not (video_dir / "1-1_ep2.mp4").exists(), "关窗后不该再开下一回合"
         assert not (video_dir / "1-2_ep1.mp4").exists(), "关窗后不该再开下一关"
+
+
+class TestSampleActions:
+    """--sample：贪心策略配固定初始状态时每回合都是重放，采样才能走出不同轨迹。"""
+
+    def test_defaults_to_greedy(self, tmp_path: Path, monkeypatch):
+        """默认必须还是看这个模型最好的表现，不能被采样悄悄改掉。"""
+        model = _FakeModel()
+        runner_mod = _patch_play(monkeypatch, _make_env_factory(), model=model)
+        config = _play_config(tmp_path, levels=("SuperMarioBros-1-1-v0",))
+
+        runner_mod.play(config)
+
+        assert model.deterministic_calls, "应至少推理过一次"
+        assert all(model.deterministic_calls), "默认应全程贪心"
+
+    def test_sample_flag_switches_to_epsilon_greedy(self, tmp_path: Path, monkeypatch):
+        """--sample 要真的改推理方式，而不只是配置里多一个字段。"""
+        model = _FakeModel()
+        runner_mod = _patch_play(monkeypatch, _make_env_factory(), model=model)
+        config = _play_config(
+            tmp_path, levels=("SuperMarioBros-1-1-v0",), sample_actions=True
+        )
+
+        runner_mod.play(config)
+
+        assert model.deterministic_calls, "应至少推理过一次"
+        assert not any(model.deterministic_calls), "开采样后每一步都该走 ε-greedy"
+
+    def test_logs_the_exploration_rate(self, tmp_path: Path, monkeypatch, caplog):
+        """采样强度取决于 checkpoint 里的探索率，可能是 1.0；不写出来没法排查。"""
+        runner_mod = _patch_play(monkeypatch, _make_env_factory())
+        config = _play_config(
+            tmp_path, levels=("SuperMarioBros-1-1-v0",), sample_actions=True
+        )
+
+        with caplog.at_level("INFO"):
+            runner_mod.play(config)
+
+        assert "0.198" in caplog.text, "应把实际的 exploration_rate 记录下来"
+
+    def test_applies_to_every_episode(self, tmp_path: Path, monkeypatch):
+        """多回合配采样，每个回合都该是采样的。"""
+        model = _FakeModel()
+        runner_mod = _patch_play(monkeypatch, _make_env_factory(), model=model)
+        config = _play_config(
+            tmp_path, levels=("SuperMarioBros-1-1-v0",), episodes=3, sample_actions=True
+        )
+
+        runner_mod.play(config)
+
+        assert not any(model.deterministic_calls)
 
 
 class TestPlayViewer:

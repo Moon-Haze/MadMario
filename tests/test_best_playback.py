@@ -104,6 +104,12 @@ class TestToPlaybackConfig:
 
         assert config.play.timestamp_videos is False
 
+    def test_keeps_greedy_actions(self, tmp_path: Path):
+        """训练侧录的是"这个最优模型的最好表现"，不能被采样噪声糊掉。"""
+        config = _to_playback_config(_train_config(tmp_path), tmp_path / "m.zip", tmp_path)
+
+        assert config.play.sample_actions is False
+
     def test_writes_to_given_video_dir(self, tmp_path: Path):
         video_dir = tmp_path / "nested" / "videos"
         config = _to_playback_config(_train_config(tmp_path), tmp_path / "m.zip", video_dir)

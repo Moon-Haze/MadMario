@@ -80,7 +80,7 @@ def _open_viewer(play_config):
         return None
 
 
-def _run_episode(env, model, recorder, state, viewer=None):
+def _run_episode(env, model, recorder, state, viewer=None, deterministic=True):
     """跑完一个回合，全程把画面写进录制器。
 
     返回 (总奖励, 步数, 是否通关, 是否因关窗而中断)。
@@ -97,8 +97,7 @@ def _run_episode(env, model, recorder, state, viewer=None):
         if viewer is not None and not viewer.is_open:
             return total_reward, step, False, True
 
-        # 贪心动作
-        action, _ = model.predict(state, deterministic=True)
+        action, _ = model.predict(state, deterministic=deterministic)
         state, reward, terminated, truncated, info = env.step(int(action))
         total_reward += float(reward)
         step += 1
@@ -151,7 +150,9 @@ def play(config: AppConfig, catch_interrupt: bool = True) -> None:
     不弹窗；没有显示器的环境（服务器 / SSH）会自动走这个行为。
 
     ``config.play.episodes`` 决定每个关卡跑几个回合：多于 1 回合时文件名带
-    ``_epN`` 序号，免得后面几回合把第一回合的视频覆盖掉。
+    ``_epN`` 序号，免得后面几回合把第一回合的视频覆盖掉。默认每个回合都走贪心
+    策略，轨迹完全相同；要让各回合真正走出不同打法，得同时开
+    ``config.play.sample_actions``。
 
     停止方式：关掉显示窗口，或按 Ctrl+C——两者都会保住已录制的部分。
 
@@ -166,6 +167,7 @@ def play(config: AppConfig, catch_interrupt: bool = True) -> None:
 
     levels = config.env.levels or [None]
     episodes = config.play.episodes
+    sample_actions = config.play.sample_actions
     base_dir = config.play.video_dir or (config.artifacts.save_root / "videos")
     # 训练侧自己按步数分好了目录，再来一层时间戳只是多余的套娃
     video_dir = _timestamped_dir(base_dir) if config.play.timestamp_videos else base_dir
@@ -185,6 +187,13 @@ def play(config: AppConfig, catch_interrupt: bool = True) -> None:
                 logger.info(f"正在加载 checkpoint: {checkpoint_path}")
                 model = DQN.load(str(checkpoint_path), device="auto")
                 logger.info(f"模型已加载。已训练步数: {model.num_timesteps}")
+                if sample_actions:
+                    # 采样强度完全由 checkpoint 里的探索率决定，可能是 0.02 也可能
+                    # 是训练中途的 1.0。打出来，免得画面糊了还以为是模型的问题
+                    logger.info(
+                        "按 ε-greedy 采样动作：exploration_rate=%.3f，每回合轨迹都会不同",
+                        getattr(model, "exploration_rate", float("nan")),
+                    )
 
             level_label = level_name or f"世界{config.env.world}-{config.env.level}"
 
@@ -204,7 +213,8 @@ def play(config: AppConfig, catch_interrupt: bool = True) -> None:
                     state, _ = env.reset()
                     with VideoRecorder(video_path, fps=config.play.video_fps) as recorder:
                         total_reward, step, flag_get, viewer_closed = _run_episode(
-                            env, model, recorder, state, viewer
+                            env, model, recorder, state, viewer,
+                            deterministic=not sample_actions,
                         )
                         logger.info(
                             "关卡 %s 第 %d 回合：步数=%d，奖励=%.1f，通关=%s，已录制 %d 帧 → %s",

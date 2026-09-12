@@ -100,6 +100,11 @@ class PlayConfig:
     timestamp_videos: bool = True
     # 每个关卡跑几个回合。大于 1 时视频文件名带回合序号，否则后一回合会覆盖前一回合
     episodes: int = 1
+    # 按 ε-greedy 采样动作（用 checkpoint 里存下的 exploration_rate），而不是贪心
+    # 取最大 Q。默认关：默认行为该是"看这个模型最好的表现"。之所以需要它，是因为
+    # 贪心策略 + 固定初始状态意味着同一关卡每次都逐帧重放，多跑几个回合也看不到
+    # 新东西；只有引入动作随机性，轨迹才会真正分岔
+    sample_actions: bool = False
 
 
 # ──────────────────────────────────────────────
@@ -459,6 +464,8 @@ def add_play_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--checkpoint", type=Path, default=None, help="要播放的 checkpoint")
     parser.add_argument("--episodes", type=int, default=1,
                         help="每个关卡播放的回合数，大于 1 时视频名带回合序号")
+    parser.add_argument("--sample", dest="sample_actions", action="store_true",
+                        help="按 ε-greedy 采样动作；配合 --episodes 可看到不同打法")
     parser.add_argument("--game", type=str, default=EnvConfig.game, help="游戏名称")
     parser.add_argument("--world", type=int, default=EnvConfig.world, help="世界/大关")
     parser.add_argument("--level", type=int, default=EnvConfig.level, help="关卡")
@@ -607,5 +614,6 @@ def config_from_play_args(args) -> AppConfig:
             show=args.show,
             # 同理：0 或负数表示"一回合都不跑"，那等于什么都没播
             episodes=max(1, args.episodes),
+            sample_actions=args.sample_actions,
         ),
     )
