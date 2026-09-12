@@ -70,31 +70,35 @@ python -m mad_mario.cli play [options]
 | **Training** | | |
 | `--timesteps`, `--total-timesteps` | `10000000` | Total training steps (two spellings of the same option) |
 | `--learning-rate` | `6.25e-05` | Learning rate |
-| `--batch-size` | `32` | Batch size per learning step |
+| `--batch-size` | `64` | Batch size per learning step |
 | `--gamma` | `0.99` | Discount factor (γ) |
-| `--buffer-size` | `50000` | Experience replay buffer capacity |
+| `--buffer-size` | `100000` | Experience replay capacity — a **total** transition count, divided by `--num-envs` internally. Costs roughly 53 MiB per 1000 transitions, so check your free RAM before raising it |
 | `--learning-starts` | `50000` | Steps of experience to collect before training starts |
 | `--train-freq` | `4` | Train every N environment steps |
 | `--target-update-interval` | `8000` | Target network update interval |
-| `--exploration-fraction` | `0.1` | Fraction of total steps over which ε decays linearly |
+| `--exploration-fraction` | `0.1` | Fraction of total steps over which ε decays linearly; ignored when `--exploration-steps` is set |
+| `--exploration-steps` | — | Absolute ε decay budget: the global step at which ε reaches `--exploration-final-eps`. Unlike the fraction it does not grow with `--timesteps`, and it is re-applied on resume |
 | `--exploration-initial-eps` | `1.0` | Initial ε |
 | `--exploration-final-eps` | `0.02` | Final ε |
 | `--max-grad-norm` | `10.0` | Gradient clipping max norm |
 | `--seed` | `42` | Random seed |
+| `--n-steps` | `1` | n-step return horizon; values > 1 switch SB3 to `NStepReplayBuffer` |
 | **Checkpoint & Logging** | | |
 | `--save-root` | `checkpoints` | Checkpoint root directory |
 | `--flat-save-root` | *(flag)* | Use save-root directly without the compatibility subdirectory |
 | `--run-name` | — | Name for this training run |
 | `--checkpoint` | — | Path to a specific checkpoint to resume from |
 | `--save-replay-buffer` | *(flag)* | Also save the replay buffer (the file can be very large) |
+| `--save-freq` | `100000` | Save a periodic checkpoint every N environment steps |
 | `--num-envs` | `cpus // 2` | Number of parallel environments |
-| `--eval-freq` | `10000` | Run a greedy evaluation every N environment steps |
-| `--eval-episodes` | `3` | Number of episodes per evaluation |
+| `--eval-freq` | `10000` | Run a greedy evaluation every N environment steps. Each evaluation runs `eval-levels × --eval-episodes` episodes |
+| `--eval-episodes` | `3` | Episodes per evaluation level |
+| `--eval-levels` | `3` | How many training levels the evaluation covers, picked evenly from the training set. Set to `1` for the old single-level behaviour |
 | `--no-play-best` | *(flag)* | Skip the automatic recording whenever a new best model is saved (on by default) |
 | `--log-interval` | `20` | Log metrics and refresh charts every N episodes |
 | `--log-level` | `info` | Log level — choices: `debug`, `info`, `warning`, `error` |
 | **Reward Shaping** | | |
-| `--no-reward-clip` | *(flag)* | Disable reward clipping |
+| `--reward-clip` / `--no-reward-clip` | *(off)* | Clip rewards to ±`--reward-clip-value`. Off by default: clipping flattens the −25 death penalty to −1 and the ~+7 per-step progress reward to +1, discarding most of the native signal |
 | `--reward-clip-value` | `1.0` | Reward clipping absolute value |
 | `--no-stuck-penalty` | *(flag)* | Disable the stuck penalty and early truncation. Stuck rescue stays on; pass `--no-stuck-rescue` as well to disable stuck handling entirely |
 | `--stuck-max-steps` | `120` | Consecutive steps without net progress before considered stuck |
@@ -108,6 +112,24 @@ python -m mad_mario.cli play [options]
 | `--score-reward-scale` | `0.01` | Reward per 1 point of game score |
 | `--no-flag-reward` | *(flag)* | Disable the flagpole reward |
 | `--flag-reward-value` | `50.0` | Flagpole completion reward value |
+
+### Resuming: CLI flags win
+
+`DQN.load` resolves hyperparameters as *caller kwargs > checkpoint data > class
+defaults*. The trainer used to pass none of them, so on a resumed run every CLI
+hyperparameter — `--learning-rate`, `--buffer-size`, `--batch-size`, `--gamma`,
+`--n-steps`, the ε schedule — was silently ignored; only `--timesteps` took
+effect, because it is a `learn()` argument rather than a constructor argument.
+The trainer now passes the CLI values explicitly, and logs the effective ones.
+
+Structural parameters (`policy`, `policy_kwargs`) are deliberately *not*
+overridden: a changed network invalidates the saved weights, so start a fresh run
+instead of resuming.
+
+`--exploration-fraction` is relative to the *total* budget, which grows with
+`--timesteps`: `0.1` on a 1e9-step run means a 1e8-step anneal, leaving ε ≈ 0.2
+after 87M steps. Use `--exploration-steps N` to pin the anneal to an absolute
+global step instead.
 
 ### `play` Options
 

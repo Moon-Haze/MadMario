@@ -314,6 +314,68 @@ class TestConfigFromTrainArgs:
         config = config_from_train_args(args)
         assert config.artifacts.log_level == "debug"
 
+    def test_n_steps_and_exploration_steps(self):
+        parser = argparse.ArgumentParser()
+        add_train_args(parser)
+        args = parser.parse_args(["--n-steps", "3", "--exploration-steps", "5000000"])
+        config = config_from_train_args(args)
+        assert config.sb3.n_steps == 3
+        assert config.sb3.exploration_steps == 5_000_000
+
+    def test_exploration_steps_defaults_to_none(self):
+        """None 表示沿用 --exploration-fraction 的比例语义。"""
+        parser = argparse.ArgumentParser()
+        add_train_args(parser)
+        config = config_from_train_args(parser.parse_args([]))
+        assert config.sb3.exploration_steps is None
+
+    def test_eval_levels(self):
+        parser = argparse.ArgumentParser()
+        add_train_args(parser)
+        config = config_from_train_args(parser.parse_args(["--eval-levels", "6"]))
+        assert config.artifacts.eval_levels == 6
+
+    def test_eval_levels_floors_at_one(self):
+        """0 会让评估环境数变成 0，直接起不来。"""
+        parser = argparse.ArgumentParser()
+        add_train_args(parser)
+        config = config_from_train_args(parser.parse_args(["--eval-levels", "0"]))
+        assert config.artifacts.eval_levels == 1
+
+    def test_save_freq(self):
+        parser = argparse.ArgumentParser()
+        add_train_args(parser)
+        config = config_from_train_args(parser.parse_args(["--save-freq", "250000"]))
+        assert config.artifacts.save_freq == 250_000
+
+    def test_reward_clip_defaults_off(self):
+        """裁剪会把 −25 的死亡惩罚压成 −1，默认不该开。"""
+        parser = argparse.ArgumentParser()
+        add_train_args(parser)
+        config = config_from_train_args(parser.parse_args([]))
+        assert config.env.clip_rewards is False
+
+    def test_reward_clip_can_be_turned_on(self):
+        parser = argparse.ArgumentParser()
+        add_train_args(parser)
+        config = config_from_train_args(parser.parse_args(["--reward-clip"]))
+        assert config.env.clip_rewards is True
+
+    def test_no_reward_clip_still_accepted(self):
+        """旧命令行的 --no-reward-clip 必须继续可用，否则既有的脚本会解析失败。"""
+        parser = argparse.ArgumentParser()
+        add_train_args(parser)
+        config = config_from_train_args(parser.parse_args(["--no-reward-clip"]))
+        assert config.env.clip_rewards is False
+
+    def test_bigger_defaults(self):
+        """缓冲区是总转移数，会被除以并行环境数；5 万配 24 个环境留不住成功样本。"""
+        parser = argparse.ArgumentParser()
+        add_train_args(parser)
+        config = config_from_train_args(parser.parse_args([]))
+        assert config.sb3.buffer_size == 100_000
+        assert config.sb3.batch_size == 64
+
 
 # ─────────────────────────────
 # config_from_play_args

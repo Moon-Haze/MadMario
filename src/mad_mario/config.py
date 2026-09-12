@@ -25,7 +25,9 @@ class EnvConfig:
     resize_shape: int = 84
     render_mode: str | None = None
     movement: str = "right_only"
-    clip_rewards: bool = True
+    # 默认关闭：裁剪把 ±1 之外的奖励一律压平，−25 的死亡惩罚被砍成 −1、
+    # 每步约 +7 的前进奖励被砍成 +1，原生奖励的区分度基本丢光
+    clip_rewards: bool = False
     reward_clip_value: float = 1.0
     stuck_penalty_enabled: bool = True
     stuck_max_steps: int = 120
@@ -52,19 +54,30 @@ class SB3Config:
     """映射到 stable-baselines3 DQN 构造参数。"""
     total_timesteps: int = 10_000_000
     learning_rate: float = 0.0000625
-    buffer_size: int = 50_000
+    # 注意这是**总转移数**：SB3 会除以并行环境数（buffer_size // n_envs）。
+    # 5 万配 24 个环境只剩 2083 条/环境、约 770 个回合，稀疏的通关样本留不住。
+    # 10 万约占 5.3 GiB——20 万要 11.3 GiB，实测本机可用内存只有 9.8 GiB，
+    # SB3 会直接告警"装不下"。内存宽裕的机器可以往上调。
+    buffer_size: int = 100_000
     learning_starts: int = 50_000
-    batch_size: int = 32
+    batch_size: int = 64
     tau: float = 1.0
     gamma: float = 0.99
     train_freq: int = 4  # 每 N 步训练一次
     gradient_steps: int = 1
     target_update_interval: int = 8_000
     exploration_fraction: float = 0.1
+    # 绝对退火步数：全局第几步退到 exploration_final_eps。设了就覆盖
+    # exploration_fraction——比例语义会随总步数一起放大（0.1 配 10 亿步 =
+    # 1.06 亿步的退火窗口，ε 跑到 8700 万步时还有 0.2），绝对步数不会。
+    # None 表示沿用比例。
+    exploration_steps: int | None = None
     exploration_initial_eps: float = 1.0
     exploration_final_eps: float = 0.02
     max_grad_norm: float = 10.0
     seed: int = 42
+    # n 步回报；>1 时 SB3 自动把回放缓冲区换成 NStepReplayBuffer
+    n_steps: int = 1
     policy_kwargs: dict | None = None
 
 
@@ -81,7 +94,10 @@ class SB3ArtifactConfig:
     save_freq: int = 100_000          # 每隔多少步保存一次 checkpoint
     save_replay_buffer: bool = False  # 保存经验回放缓冲区（文件很大）
     eval_freq: int = 10_000           # 每隔多少步执行一次评估
-    eval_episodes: int = 3
+    eval_episodes: int = 3            # 每个评估关卡跑几个回合
+    # 评估覆盖几个训练关卡（从训练关卡集里等距抽取，确定性）。评估总回合数 =
+    # 本值 × eval_episodes。置 1 即退回"只评一关"的旧行为
+    eval_levels: int = 3
     log_interval: int = 20            # 每隔多少 episode 输出日志+刷新图表
     num_envs: int = max(1, (os.cpu_count() or 2) // 2)
 
@@ -398,7 +414,10 @@ def add_train_args(parser: argparse.ArgumentParser) -> None:
     train.add_argument("--target-update-interval", type=int, default=SB3Config.target_update_interval,
                        help="目标网络更新间隔")
     train.add_argument("--exploration-fraction", type=float, default=SB3Config.exploration_fraction,
-                       help="epsilon 衰减占总步数的比例")
+                       help="epsilon 衰减占总步数的比例（设了 --exploration-steps 时被忽略）")
+    train.add_argument("--exploration-steps", type=int, default=SB3Config.exploration_steps,
+                       help="epsilon 衰减的绝对步数：全局第几步退到 --exploration-final-eps；"
+                            "不受总步数放大影响，续训时也按此重新校准")
     train.add_argument("--exploration-initial-eps", type=float, default=SB3Config.exploration_initial_eps,
                        help="初始探索率")
     train.add_argument("--exploration-final-eps", type=float, default=SB3Config.exploration_final_eps,
@@ -406,6 +425,8 @@ def add_train_args(parser: argparse.ArgumentParser) -> None:
     train.add_argument("--max-grad-norm", type=float, default=SB3Config.max_grad_norm,
                        help="梯度裁剪范数")
     train.add_argument("--seed", type=int, default=SB3Config.seed, help="随机种子")
+    train.add_argument("--n-steps", type=int, default=SB3Config.n_steps,
+                       help="n 步回报的步数，>1 时启用 NStepReplayBuffer")
 
     # ── 工件参数 ──
     art = parser.add_argument_group("保存与恢复")
@@ -422,7 +443,11 @@ def add_train_args(parser: argparse.ArgumentParser) -> None:
     art.add_argument("--eval-freq", type=int, default=SB3ArtifactConfig.eval_freq,
                      help="每隔多少步执行评估")
     art.add_argument("--eval-episodes", type=int, default=SB3ArtifactConfig.eval_episodes,
-                     help="每次评估的回合数")
+                     help="每个评估关卡跑几个回合")
+    art.add_argument("--eval-levels", type=int, default=SB3ArtifactConfig.eval_levels,
+                     help="评估覆盖的训练关卡数（等距抽取）；评估总回合数 = 关卡数 × --eval-episodes")
+    art.add_argument("--save-freq", type=int, default=SB3ArtifactConfig.save_freq,
+                     help="每隔多少步保存一次 checkpoint")
     art.add_argument("--no-play-best", dest="play_on_best", action="store_false",
                      help="最优模型刷新时不录制视频（默认每次刷新都录）")
     art.add_argument("--log-interval", type=int, default=SB3ArtifactConfig.log_interval,
@@ -433,7 +458,11 @@ def add_train_args(parser: argparse.ArgumentParser) -> None:
 
     # ── 奖励塑形参数 ──
     rw = parser.add_argument_group("奖励塑形")
-    rw.add_argument("--no-reward-clip", action="store_true", help="关闭奖励裁剪")
+    # BooleanOptionalAction 同时生成 --reward-clip 与 --no-reward-clip，
+    # 旧脚本里的 --no-reward-clip 因此继续可用
+    rw.add_argument("--reward-clip", action=argparse.BooleanOptionalAction,
+                    default=EnvConfig.clip_rewards,
+                    help="奖励裁剪（默认关闭：裁剪把 -25 的死亡惩罚压成 -1，原生奖励的区分度全丢）")
     rw.add_argument("--reward-clip-value", type=float, default=EnvConfig.reward_clip_value,
                     help="奖励裁剪绝对值")
     rw.add_argument("--no-stuck-penalty", action="store_true",
@@ -519,7 +548,7 @@ def config_from_train_args(args) -> AppConfig:
         movement=args.movement,
         levels=levels,
         worlds=worlds,
-        clip_rewards=not args.no_reward_clip,
+        clip_rewards=args.reward_clip,
         reward_clip_value=args.reward_clip_value,
         stuck_penalty_enabled=not args.no_stuck_penalty,
         stuck_max_steps=max(1, args.stuck_max_steps),
@@ -546,10 +575,14 @@ def config_from_train_args(args) -> AppConfig:
         train_freq=args.train_freq,
         target_update_interval=args.target_update_interval,
         exploration_fraction=args.exploration_fraction,
+        # 0 与负数都当作"未启用"，免得算出负比例
+        exploration_steps=(max(1, args.exploration_steps)
+                           if args.exploration_steps is not None else None),
         exploration_initial_eps=args.exploration_initial_eps,
         exploration_final_eps=args.exploration_final_eps,
         max_grad_norm=args.max_grad_norm,
         seed=args.seed,
+        n_steps=max(1, args.n_steps),
     )
 
     artifact_config = SB3ArtifactConfig(
@@ -557,8 +590,10 @@ def config_from_train_args(args) -> AppConfig:
         num_envs=max(1, args.num_envs),
         checkpoint=args.checkpoint,
         save_replay_buffer=args.save_replay_buffer,
+        save_freq=args.save_freq,
         eval_freq=args.eval_freq,
         eval_episodes=args.eval_episodes,
+        eval_levels=max(1, args.eval_levels),
         log_interval=args.log_interval,
         log_level=args.log_level,
     )
