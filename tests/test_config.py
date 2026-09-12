@@ -404,3 +404,79 @@ class TestStuckRescueConfig:
         config = config_from_play_args(args)
         assert config.env.stuck_penalty_enabled is False
         assert config.env.stuck_rescue_enabled is True
+
+
+# ─────────────────────────────
+# 播放录制配置
+# ─────────────────────────────
+class TestPlayConfig:
+    def test_cli_flags_map_to_play_config(self):
+        parser = argparse.ArgumentParser()
+        add_play_args(parser)
+        args = parser.parse_args(["--video-fps", "30", "--video-dir", "/tmp/v"])
+        config = config_from_play_args(args)
+        assert config.play.video_fps == 30
+        assert config.play.video_dir == Path("/tmp/v")
+
+    def test_defaults(self):
+        parser = argparse.ArgumentParser()
+        add_play_args(parser)
+        args = parser.parse_args([])
+        config = config_from_play_args(args)
+        # 15 = 60 / frame_skip(4)，即还原真实播放速度的帧率
+        assert config.play.video_fps == 15
+        assert config.play.video_dir is None   # None 表示用 save_root/videos
+
+    def test_fps_clamped_to_one(self):
+        # 0 或负帧率会让编码器直接失败，下限钳制为 1
+        parser = argparse.ArgumentParser()
+        add_play_args(parser)
+        args = parser.parse_args(["--video-fps", "0"])
+        config = config_from_play_args(args)
+        assert config.play.video_fps == 1
+
+    def test_train_config_keeps_default_play(self):
+        # AppConfig 新增的 play 字段带默认值，训练路径不传也不该受影响
+        parser = argparse.ArgumentParser()
+        add_train_args(parser)
+        args = parser.parse_args([])
+        config = config_from_train_args(args)
+        assert config.play.video_fps == 15
+
+    def test_show_defaults_to_on(self):
+        # 默认边显示边录制；无 GUI 环境由 play() 自行降级，而非靠这里改默认值
+        parser = argparse.ArgumentParser()
+        add_play_args(parser)
+        args = parser.parse_args([])
+        config = config_from_play_args(args)
+        assert config.play.show is True
+
+    def test_no_show_flag(self):
+        parser = argparse.ArgumentParser()
+        add_play_args(parser)
+        args = parser.parse_args(["--no-show"])
+        config = config_from_play_args(args)
+        assert config.play.show is False
+
+    def test_timestamp_videos_defaults_to_on(self):
+        # 命令行播放默认按时间分档，免得反复播放互相覆盖
+        parser = argparse.ArgumentParser()
+        add_play_args(parser)
+        args = parser.parse_args([])
+        config = config_from_play_args(args)
+        assert config.play.timestamp_videos is True
+
+    def test_play_on_best_defaults_to_on(self):
+        # 训练中每次刷新最优模型都录一段，是 --no-play-best 要关掉的行为
+        parser = argparse.ArgumentParser()
+        add_train_args(parser)
+        args = parser.parse_args([])
+        config = config_from_train_args(args)
+        assert config.play.play_on_best is True
+
+    def test_no_play_best_flag(self):
+        parser = argparse.ArgumentParser()
+        add_train_args(parser)
+        args = parser.parse_args(["--no-play-best"])
+        config = config_from_train_args(args)
+        assert config.play.play_on_best is False

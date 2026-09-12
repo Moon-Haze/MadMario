@@ -4,7 +4,7 @@ import argparse
 import json
 import os
 import sys
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
 
@@ -87,6 +87,20 @@ class SB3ArtifactConfig:
 
 
 # ──────────────────────────────────────────────
+# 播放配置
+# ──────────────────────────────────────────────
+@dataclass
+class PlayConfig:
+    video_dir: Path | None = None   # None 表示用 save_root/videos
+    video_fps: int = 15             # 对应 frame_skip=4 时的真实播放速度
+    show: bool = True               # 同时弹窗实时显示；无 GUI 环境会自动降级
+    play_on_best: bool = True       # 训练中每次刷新最优模型就录一次视频
+    # 视频再套一层时间戳目录，让每场播放各存一份、互不覆盖。训练侧录 best 模型
+    # 时置 False：那边的 step_xxx 目录本身已经分好档了
+    timestamp_videos: bool = True
+
+
+# ──────────────────────────────────────────────
 # 顶层配置
 # ──────────────────────────────────────────────
 @dataclass
@@ -94,6 +108,7 @@ class AppConfig:
     env: EnvConfig
     sb3: SB3Config
     artifacts: SB3ArtifactConfig
+    play: PlayConfig = field(default_factory=PlayConfig)
 
 
 # ──────────────────────────────────────────────
@@ -402,6 +417,8 @@ def add_train_args(parser: argparse.ArgumentParser) -> None:
                      help="每隔多少步执行评估")
     art.add_argument("--eval-episodes", type=int, default=SB3ArtifactConfig.eval_episodes,
                      help="每次评估的回合数")
+    art.add_argument("--no-play-best", dest="play_on_best", action="store_false",
+                     help="最优模型刷新时不录制视频（默认每次刷新都录）")
     art.add_argument("--log-interval", type=int, default=SB3ArtifactConfig.log_interval,
                      help="每隔多少 episode 输出日志")
     art.add_argument("--log-level", choices=("debug", "info", "warning", "error"),
@@ -454,6 +471,12 @@ def add_play_args(parser: argparse.ArgumentParser) -> None:
                         help="输出根目录")
     parser.add_argument("--flat-save-root", action="store_true",
                         help="直接使用输出根目录，不按兼容参数分子目录")
+    parser.add_argument("--video-dir", type=Path, default=None,
+                        help="视频输出目录（默认 save_root/videos）")
+    parser.add_argument("--video-fps", type=int, default=PlayConfig.video_fps,
+                        help="视频帧率，15 对应 frame_skip=4 时的真实播放速度")
+    parser.add_argument("--no-show", dest="show", action="store_false",
+                        help="只录制不弹窗；无显示器的环境会自动走这个行为")
 
 
 # ──────────────────────────────────────────────
@@ -530,7 +553,12 @@ def config_from_train_args(args) -> AppConfig:
         log_level=args.log_level,
     )
 
-    return AppConfig(env=env_config, sb3=sb3_config, artifacts=artifact_config)
+    return AppConfig(
+        env=env_config,
+        sb3=sb3_config,
+        artifacts=artifact_config,
+        play=PlayConfig(play_on_best=args.play_on_best),
+    )
 
 
 def config_from_play_args(args) -> AppConfig:
@@ -569,4 +597,10 @@ def config_from_play_args(args) -> AppConfig:
         env=env_config,
         sb3=SB3Config(),
         artifacts=SB3ArtifactConfig(save_root=save_root, checkpoint=checkpoint, resume=True),
+        # fps 至少为 1，0 或负数会让编码器直接失败
+        play=PlayConfig(
+            video_dir=args.video_dir,
+            video_fps=max(1, args.video_fps),
+            show=args.show,
+        ),
     )

@@ -106,6 +106,7 @@ python -m mad_mario.cli play [options]
 | `--record-every` | `20` | Log metrics, refresh charts, and save every N episodes |
 | `--eval-every` | `50` | Run greedy evaluation every N episodes |
 | `--eval-episodes` | `3` | Number of episodes per evaluation |
+| `--no-play-best` | *(flag)* | Skip the automatic recording whenever a new best model is saved (on by default) |
 | `--save-every` | `500000` | Save checkpoint every N environment steps |
 
 ### `play` Options
@@ -119,9 +120,12 @@ python -m mad_mario.cli play [options]
 | `--level` | `1` | Level number |
 | `--version` | `0` | Environment version suffix |
 | `--movement` | `right_only` | Action space preset — choices: `right_only`, `simple`, `complex` |
-| `--render-mode` | `rgb_array` | Environment render mode (uses matplotlib display) |
+| `--render-mode` | `rgb_array` | Environment render mode — playback always records, so it is forced to `rgb_array` |
 | `--save-root` | `checkpoints` | Output root directory |
 | `--flat-save-root` | *(flag)* | Use save-root directly without subdirectory |
+| `--video-dir` | `<save-root>/videos` | Parent directory for recorded videos; a timestamped subdirectory is created inside it |
+| `--video-fps` | `15` | Video frame rate — 15 matches real speed at `frame_skip=4` |
+| `--no-show` | *(flag)* | Record only, without the live window |
 
 ### Running
 
@@ -185,10 +189,58 @@ mad-mario train --vector
 ### Play a Trained Mario
 
 ```bash
+# 单个关卡：边看边录
 python -m mad_mario.cli play --checkpoint checkpoints/latest.chkpt
+
+# 指定关卡与输出目录
+python -m mad_mario.cli play --checkpoint checkpoints/latest.chkpt \
+    --levels 1-1,1-2 --video-dir out/videos
+
+# 只录制，不弹窗
+python -m mad_mario.cli play --checkpoint checkpoints/latest.chkpt --no-show
 ```
 
-The play command uses `rgb_array` rendering by default and displays frames through matplotlib, which works around common `nes-py` human-window issues on Windows + Python 3.13.
+Playback shows the game in a window while recording it: each level gets its own `.mp4` named after the level (`1-1.mp4`, `1-2.mp4`), written into a **fresh timestamped directory** so replaying the same model never overwrites the last run:
+
+```text
+<save-root>/videos/
+  20260912_143022/
+    1-1.mp4
+    1-2.mp4
+  20260912_151047/      # 另一次播放，各存各的
+    1-1.mp4
+    1-2.mp4
+```
+
+The directory is named after local start time (`YYYYMMDD_HHMMSS`); playing twice within the same second appends a counter (`20260912_143022_2`) rather than sharing a directory. `--video-dir` only changes where the parent goes — the timestamped directory is still created inside it.
+
+The window is paced at `--video-fps`, so what you watch matches the video's playback speed.
+
+It stops when you close the window or press `Ctrl+C`; either way the partial recording is kept.
+
+Video needs pixel frames, so playback always forces `rgb_array` rendering regardless of `--render-mode`. A clip contains one frame per agent step plus the opening frame, so its length is `steps / video_fps` seconds.
+
+Pass `--no-show` to record without a window — that is also what happens automatically on a machine with no display (a server or an SSH session), where playback logs a warning and records the video only. Either way each frame is rendered once and used for both output.
+
+### Automatic Recording of the Best Model
+
+While training, every time the evaluation callback saves a new best model, playback runs on it automatically and records **all the levels training uses** — no window, video only. Results land next to the checkpoint, one directory per training stage:
+
+```text
+checkpoints/<compat>/
+  best_model/
+    best_model.zip
+  best_model_videos/
+    step_000160000/      # 第 16 万步刷新时的录制
+      1-1.mp4
+      1-2.mp4
+    step_000830000/
+      ...
+```
+
+The `step_XXXX` directory name is the step count when the best score improved, so clips from different stages of training can be compared side by side. These directories are stamped by training step rather than by wall-clock time — the timestamped-directory scheme described above applies to the `play` command only. Recording uses unshaped playback settings (reward shaping and the stuck penalty off, stuck rescue still on) — it shows what the agent has actually learned, not what the training rewards push it toward.
+
+Recording failures only log a warning and never interrupt training: a full disk or a broken encoder does not cost you the run. Pass `--no-play-best` to turn the automatic recording off entirely; evaluation and best-model saving are unaffected.
 
 ## Output Files
 
@@ -220,20 +272,24 @@ The trainer no longer creates many `mario_net_step_*.chkpt` backup files. Each t
 
 ## Project Structure
 
-| Path                                   | Description                                                   |
-| -------------------------------------- | ------------------------------------------------------------- |
-| `src/mad_mario/cli.py`                 | Unified CLI for training and playback                         |
-| `src/mad_mario/config.py`              | Dataclass configs and CLI argument parsing                    |
-| `src/mad_mario/agent/mario.py`         | Agent behavior: action selection, replay caching, DQN updates |
-| `src/mad_mario/agent/checkpoint.py`    | Checkpoint loading and saving                                 |
-| `src/mad_mario/agent/replay_buffer.py` | Experience replay buffer                                      |
-| `src/mad_mario/env/factory.py`         | Mario environment and vector environment creation             |
-| `src/mad_mario/env/wrappers.py`        | Environment preprocessing wrappers                            |
-| `src/mad_mario/models/mario_net.py`    | Q-value CNN model                                             |
-| `src/mad_mario/training/trainer.py`    | Training component assembly                                   |
-| `src/mad_mario/training/loops.py`      | Single-env and vector-env training loops                      |
-| `src/mad_mario/training/artifacts.py`  | latest/runs output path management                            |
-| `src/mad_mario/logging/metrics.py`     | CSV metrics and plot generation                               |
+| Path                                        | Description                                                     |
+| ------------------------------------------- | --------------------------------------------------------------- |
+| `src/mad_mario/cli.py`                      | Entry point: parse args, set up logging, dispatch to train/play |
+| `src/mad_mario/config.py`                   | Dataclass configs and CLI argument parsing                      |
+| `src/mad_mario/playback/runner.py`          | Playback: run a checkpoint over levels and record it            |
+| `src/mad_mario/playback/video.py`           | Frame-to-mp4 recorder                                           |
+| `src/mad_mario/playback/viewer.py`          | Live playback window and GUI-availability check                 |
+| `src/mad_mario/training/best_playback.py`   | Records the best model whenever evaluation improves it          |
+| `src/mad_mario/agent/mario.py`              | Agent behavior: action selection, replay caching, DQN updates   |
+| `src/mad_mario/agent/checkpoint.py`         | Checkpoint loading and saving                                   |
+| `src/mad_mario/agent/replay_buffer.py`      | Experience replay buffer                                        |
+| `src/mad_mario/env/factory.py`              | Mario environment and vector environment creation               |
+| `src/mad_mario/env/wrappers.py`             | Environment preprocessing wrappers                              |
+| `src/mad_mario/models/mario_net.py`         | Q-value CNN model                                               |
+| `src/mad_mario/training/trainer.py`         | Training component assembly                                     |
+| `src/mad_mario/training/loops.py`           | Single-env and vector-env training loops                        |
+| `src/mad_mario/training/artifacts.py`       | latest/runs output path management                              |
+| `src/mad_mario/logging/metrics.py`          | CSV metrics and plot generation                                 |
 
 Source code uses the `src/` layout. New code should import from `mad_mario` directly. The old root-level training/import shims have been removed.
 

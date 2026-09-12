@@ -7,7 +7,7 @@ from typing import Any
 
 import numpy as np
 from stable_baselines3 import DQN
-from stable_baselines3.common.callbacks import CallbackList, CheckpointCallback, EvalCallback
+from stable_baselines3.common.callbacks import CallbackList, CheckpointCallback
 from stable_baselines3.common.monitor import Monitor
 from stable_baselines3.common.vec_env import SubprocVecEnv
 
@@ -15,6 +15,7 @@ from mad_mario.config import AppConfig, compatible_save_root, resolve_checkpoint
 from mad_mario.env.factory import make_mario_env
 from mad_mario.logging.metrics import MarioMetricsCallback
 from mad_mario.logging.setup import capture_stdout_to
+from mad_mario.training.best_playback import BestModelPlaybackCallback
 
 logger = logging.getLogger(__name__)
 
@@ -117,9 +118,10 @@ def train(config: AppConfig, log_path: Path | None = None) -> None:
         verbose=1,
     )
 
-    # 评估回调（SB3 内置，自动保存 best model + 记录评估日志）
+    # 评估回调（SB3 内置逻辑：保存 best model + 记录评估日志），并在最优模型
+    # 刷新时顺带录一段视频；--no-play-best 可关掉录制，评估本身不受影响
     eval_env = SubprocVecEnv([lambda: Monitor(_env_thunk(config.env)())])
-    eval_callback = EvalCallback(
+    eval_callback = BestModelPlaybackCallback(
         eval_env,
         best_model_save_path=str(save_root / "best_model"),
         log_path=str(save_root / "eval_logs"),
@@ -128,6 +130,7 @@ def train(config: AppConfig, log_path: Path | None = None) -> None:
         deterministic=True,
         # verbose=0 静默评估打印；best model / eval_logs / tensorboard 记录不受影响
         verbose=0,
+        train_config=config,
     )
 
     # 自定义指标回调（CSV + PNG 图表 + Mario 特有指标）
