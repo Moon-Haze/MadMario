@@ -55,6 +55,8 @@ python -m mad_mario.cli play [options]
 
 ### `train` Options
 
+`--config PATH` is a global option (it goes before the subcommand) pointing at a JSON config file; flags given explicitly on the command line override the matching values in that file.
+
 | Argument | Default | Description |
 | -------- | ------- | ----------- |
 | **Game & Level** | | |
@@ -65,56 +67,54 @@ python -m mad_mario.cli play [options]
 | `--levels` | — | Multi-level training, comma-separated (e.g. `1-1,1-2,1-3`) |
 | `--worlds` | — | Multi-world training, supports ranges (e.g. `1-3,5,7-8`); each world automatically uses all levels 1–4 |
 | `--movement` | `right_only` | Action space preset — choices: `right_only`, `simple`, `complex` |
-| **Environment** | | |
-| `--vector` | *(flag)* | Enable vectorized (parallel) environments |
-| `--num-envs` | `cpus // 2` | Number of parallel environments |
-| `--no-reward-clip` | *(flag)* | Disable reward clipping |
-| `--reward-clip-value` | `1.0` | Reward clipping absolute value |
-| `--no-stuck-penalty` | *(flag)* | Disable stuck penalty and early truncation |
-| `--stuck-max-steps` | `120` | Consecutive steps without movement before considered stuck |
-| `--stuck-penalty` | `5.0` | Extra reward deduction when stuck |
-| `--no-progress-reward` | *(flag)* | Disable right-movement reward |
-| `--progress-reward-scale` | `0.01` | Reward coefficient per pixel moved right |
-| `--normalize-observation` | *(flag)* | Normalize observations (default keeps uint8) |
-| **Training Loop** | | |
-| `--episodes` | `20000` | Total training episodes |
+| **Training** | | |
+| `--timesteps`, `--total-timesteps` | `10000000` | Total training steps (two spellings of the same option) |
+| `--learning-rate` | `6.25e-05` | Learning rate |
 | `--batch-size` | `32` | Batch size per learning step |
-| `--burnin` | `50000` | Experiences to collect before training starts |
-| `--learning-rate` | `0.0000625` | Initial learning rate |
-| `--lr-warmup-steps` | `10000` | Learning rate warmup steps |
-| `--lr-min-ratio` | `0.1` | Minimum LR as ratio of initial LR |
 | `--gamma` | `0.99` | Discount factor (γ) |
-| `--exploration-decay-steps` | `2000000` | ε-greedy epsilon linear decay steps |
-| `--exploration-min` | `0.02` | Minimum exploration rate |
-| `--gradient-clip-norm` | `10.0` | Gradient clipping max norm |
-| `--n-step` | `3` | N-step return (number of bootstrap steps) |
-| **Network & Algorithm** | | |
-| `--replay-capacity` | `100000` | Experience replay buffer capacity |
-| `--noisy-std-init` | `0.5` | NoisyNet noise standard deviation initial value (set to `0` for plain DuelingDQN + ε-greedy) |
-| `--no-noisy` | *(flag)* | Disable NoisyNet, fall back to DuelingDQN + ε-greedy |
-| `--per-alpha` | `0.6` | Prioritized Experience Replay (PER) priority exponent |
-| `--per-beta-start` | `0.4` | PER importance-sampling β initial value |
-| `--per-beta-frames` | `2000000` | PER β annealing frames |
-| `--per-epsilon` | `1e-6` | PER priority epsilon |
+| `--buffer-size` | `50000` | Experience replay buffer capacity |
+| `--learning-starts` | `50000` | Steps of experience to collect before training starts |
+| `--train-freq` | `4` | Train every N environment steps |
+| `--target-update-interval` | `8000` | Target network update interval |
+| `--exploration-fraction` | `0.1` | Fraction of total steps over which ε decays linearly |
+| `--exploration-initial-eps` | `1.0` | Initial ε |
+| `--exploration-final-eps` | `0.02` | Final ε |
+| `--max-grad-norm` | `10.0` | Gradient clipping max norm |
+| `--seed` | `42` | Random seed |
 | **Checkpoint & Logging** | | |
 | `--save-root` | `checkpoints` | Checkpoint root directory |
-| `--flat-save-root` | *(flag)* | Use save-root directly without version/movement subdirectory |
+| `--flat-save-root` | *(flag)* | Use save-root directly without the compatibility subdirectory |
+| `--run-name` | — | Name for this training run |
 | `--checkpoint` | — | Path to a specific checkpoint to resume from |
-| `--no-resume` | *(flag)* | Ignore latest checkpoint, start training from scratch |
-| `--keep-runs` | *(flag)* | Keep a timestamped per-run copy of artifacts |
-| `--run-name` | — | Custom run directory name (used with `--keep-runs`) |
-| `--record-every` | `20` | Log metrics, refresh charts, and save every N episodes |
-| `--eval-every` | `50` | Run greedy evaluation every N episodes |
+| `--save-replay-buffer` | *(flag)* | Also save the replay buffer (the file can be very large) |
+| `--num-envs` | `cpus // 2` | Number of parallel environments |
+| `--eval-freq` | `10000` | Run a greedy evaluation every N environment steps |
 | `--eval-episodes` | `3` | Number of episodes per evaluation |
 | `--no-play-best` | *(flag)* | Skip the automatic recording whenever a new best model is saved (on by default) |
-| `--save-every` | `500000` | Save checkpoint every N environment steps |
+| `--log-interval` | `20` | Log metrics and refresh charts every N episodes |
+| `--log-level` | `info` | Log level — choices: `debug`, `info`, `warning`, `error` |
+| **Reward Shaping** | | |
+| `--no-reward-clip` | *(flag)* | Disable reward clipping |
+| `--reward-clip-value` | `1.0` | Reward clipping absolute value |
+| `--no-stuck-penalty` | *(flag)* | Disable the stuck penalty and early truncation. Stuck rescue stays on; pass `--no-stuck-rescue` as well to disable stuck handling entirely |
+| `--stuck-max-steps` | `120` | Consecutive steps without net progress before considered stuck |
+| `--stuck-penalty` | `5.0` | Reward deducted when stuck |
+| `--no-stuck-rescue` | *(flag)* | Disable the random-action rescue after getting stuck (falls back to ending the episode on the threshold) |
+| `--stuck-rescue-max-steps` | `120` | Step budget for the random-action rescue |
+| `--stuck-progress-epsilon` | `8.0` | Net x-progress threshold (pixels) within the window; below this counts as no progress |
+| `--no-progress-reward` | *(flag)* | Disable the right-movement reward |
+| `--progress-reward-scale` | `0.01` | Reward per pixel moved right |
+| `--no-score-reward` | *(flag)* | Disable the score-change reward |
+| `--score-reward-scale` | `0.01` | Reward per 1 point of game score |
+| `--no-flag-reward` | *(flag)* | Disable the flagpole reward |
+| `--flag-reward-value` | `50.0` | Flagpole completion reward value |
 
 ### `play` Options
 
 | Argument | Default | Description |
 | -------- | ------- | ----------- |
-| `--checkpoint` | `checkpoints/<compat>/latest.chkpt` | Checkpoint to load and play |
-| `--episodes` | `1` | Number of episodes to play |
+| `--checkpoint` | *(auto)* | Checkpoint to load and play. Auto-discovery looks in `<save-root>/<compat>/` for the newest periodic checkpoint, falling back to `mario_dqn_final.zip`; playback errors out if neither exists |
+| `--episodes` | `1` | Number of episodes to play — accepted but not yet wired up: playback always runs exactly one episode per level |
 | `--game` | `SuperMarioBros` | Gym environment game name |
 | `--world` | `1` | World / level pack number |
 | `--level` | `1` | Level number |
@@ -137,21 +137,19 @@ Single environment training:
 python -m mad_mario.cli train
 ```
 
-Vectorized training:
+Training always runs on parallel environments (there is no single-env mode); `--num-envs` sets how many, defaulting to half the CPU count:
 
 ```bash
-python -m mad_mario.cli train --vector
+python -m mad_mario.cli train --num-envs 8
 ```
 
 Common options:
 
 ```bash
 python -m mad_mario.cli train \
-  --episodes 40000 \
-  --vector \
+  --timesteps 2000000 \
   --num-envs 8 \
-  --record-every 20 \
-  --save-every 500000
+  --log-interval 20
 ```
 
 Multi-world training (each world automatically uses all levels 1–4):
@@ -167,37 +165,27 @@ python -m mad_mario.cli train --worlds 1-4
 python -m mad_mario.cli train --worlds 1-3,5,7-8
 ```
 
-By default, training resumes from `checkpoints/latest.chkpt` if it exists. To start from scratch:
-
-```bash
-python -m mad_mario.cli train --no-resume
-```
-
-To keep a timestamped copy of the current run in addition to the latest files:
-
-```bash
-python -m mad_mario.cli train --keep-runs
-```
+Training resumes automatically from the newest periodic checkpoint in `<save-root>` (or its `snapshots/` subdirectory), falling back to `mario_dqn_final.zip`. Pass `--checkpoint` to resume from a specific file instead. There is currently no flag to force a from-scratch run — clear the save directory first, or point `--save-root` somewhere new.
 
 If the project is installed, the console script is also available:
 
 ```bash
 mad-mario train
-mad-mario train --vector
+mad-mario play --checkpoint checkpoints/worlds-1-8-v0_right_only/mario_dqn_final.zip
 ```
 
 ### Play a Trained Mario
 
 ```bash
 # 单个关卡：边看边录
-python -m mad_mario.cli play --checkpoint checkpoints/latest.chkpt
+python -m mad_mario.cli play --checkpoint checkpoints/worlds-1-8-v0_right_only/mario_dqn_final.zip
 
 # 指定关卡与输出目录
-python -m mad_mario.cli play --checkpoint checkpoints/latest.chkpt \
+python -m mad_mario.cli play --checkpoint checkpoints/worlds-1-8-v0_right_only/mario_dqn_final.zip \
     --levels 1-1,1-2 --video-dir out/videos
 
 # 只录制，不弹窗
-python -m mad_mario.cli play --checkpoint checkpoints/latest.chkpt --no-show
+python -m mad_mario.cli play --checkpoint checkpoints/worlds-1-8-v0_right_only/mario_dqn_final.zip --no-show
 ```
 
 Playback shows the game in a window while recording it: each level gets its own `.mp4` named after the level (`1-1.mp4`, `1-2.mp4`), written into a **fresh timestamped directory** so replaying the same model never overwrites the last run:
@@ -244,11 +232,23 @@ Recording failures only log a warning and never interrupt training: a full disk 
 
 ## Output Files
 
-Default output keeps only the latest training artifacts:
+Everything lands under the run directory `<save-root>/<compatibility-folder>/`, where the folder encodes the level selection and movement preset (e.g. `worlds-1-8-v0_right_only`); `--flat-save-root` writes into `<save-root>` itself:
 
 ```text
-checkpoints/
-  latest.chkpt
+checkpoints/worlds-1-8-v0_right_only/
+  mario_dqn_final.zip          # 收尾保存的最终模型
+  snapshots/                   # 周期保存：mario_dqn_<steps>_steps.zip
+  best_model/
+    best_model.zip             # 评估成绩最好的模型
+  best_model_videos/           # 最优模型刷新时的自动录制（见上）
+    step_000160000/1-1.mp4
+  eval_logs/
+    evaluations.npz            # 每次评估的奖励/长度
+  tensorboard/
+  logs/
+    train_20260912_143022.log  # 训练期间的标准输出镜像
+  videos/                      # play 命令的输出（按时间戳分目录）
+    20260912_151047/1-1.mp4
   latest_metrics.csv
   latest_reward.png
   latest_length.png
@@ -256,42 +256,27 @@ checkpoints/
   latest_q.png
 ```
 
-With `--keep-runs`, the trainer also writes a per-run copy:
-
-```text
-checkpoints/runs/<timestamp>/
-  checkpoint.chkpt
-  metrics.csv
-  reward.png
-  length.png
-  loss.png
-  q.png
-```
-
-The trainer no longer creates many `mario_net_step_*.chkpt` backup files. Each target location keeps one current checkpoint.
+The four `latest_*.png` charts are redrawn every `--log-interval` episodes and read their history back from `latest_metrics.csv`, so a resumed run continues the curves instead of restarting them from zero.
 
 ## Project Structure
 
-| Path                                        | Description                                                     |
-| ------------------------------------------- | --------------------------------------------------------------- |
-| `src/mad_mario/cli.py`                      | Entry point: parse args, set up logging, dispatch to train/play |
-| `src/mad_mario/config.py`                   | Dataclass configs and CLI argument parsing                      |
-| `src/mad_mario/playback/runner.py`          | Playback: run a checkpoint over levels and record it            |
-| `src/mad_mario/playback/video.py`           | Frame-to-mp4 recorder                                           |
-| `src/mad_mario/playback/viewer.py`          | Live playback window and GUI-availability check                 |
-| `src/mad_mario/training/best_playback.py`   | Records the best model whenever evaluation improves it          |
-| `src/mad_mario/agent/mario.py`              | Agent behavior: action selection, replay caching, DQN updates   |
-| `src/mad_mario/agent/checkpoint.py`         | Checkpoint loading and saving                                   |
-| `src/mad_mario/agent/replay_buffer.py`      | Experience replay buffer                                        |
-| `src/mad_mario/env/factory.py`              | Mario environment and vector environment creation               |
-| `src/mad_mario/env/wrappers.py`             | Environment preprocessing wrappers                              |
-| `src/mad_mario/models/mario_net.py`         | Q-value CNN model                                               |
-| `src/mad_mario/training/trainer.py`         | Training component assembly                                     |
-| `src/mad_mario/training/loops.py`           | Single-env and vector-env training loops                        |
-| `src/mad_mario/training/artifacts.py`       | latest/runs output path management                              |
-| `src/mad_mario/logging/metrics.py`          | CSV metrics and plot generation                                 |
+| Path                                      | Responsibility                                                 |
+| ----------------------------------------- | -------------------------------------------------------------- |
+| `src/mad_mario/cli.py`                    | Command-line entry point; dispatches to `train` and `play`     |
+| `src/mad_mario/config.py`                 | Argument parsing, config dataclasses, checkpoint resolution    |
+| `src/mad_mario/env/factory.py`            | Mario environment and vector environment creation              |
+| `src/mad_mario/env/wrappers.py`           | Environment preprocessing wrappers                             |
+| `src/mad_mario/training/trainer.py`       | SB3 DQN assembly, callbacks, and the training loop             |
+| `src/mad_mario/training/best_playback.py` | Records a video whenever the evaluation finds a new best model |
+| `src/mad_mario/playback/runner.py`        | Episode playback loop and per-level video wiring               |
+| `src/mad_mario/playback/video.py`         | Frame-to-mp4 recorder                                          |
+| `src/mad_mario/playback/viewer.py`        | Live matplotlib window used while recording                    |
+| `src/mad_mario/logging/metrics.py`        | CSV metrics and plot generation                                |
+| `src/mad_mario/logging/setup.py`          | Logging setup and stdout mirroring                             |
 
 Source code uses the `src/` layout. New code should import from `mad_mario` directly. The old root-level training/import shims have been removed.
+
+The Q-network itself is not in this repository: it is SB3's `CnnPolicy`, i.e. the NatureCNN feature extractor from the Nature 2015 DQN paper, followed by a 512-unit head and a linear Q-value output. See [Key Metrics](#key-metrics) and the `train` options above; `policy_kwargs` (currently unset) is the hook for swapping in a different architecture.
 
 ## Key Metrics
 
