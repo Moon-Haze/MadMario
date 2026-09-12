@@ -113,6 +113,19 @@ def _run_episode(env, model, recorder, state, viewer=None):
     return total_reward, step, flag_get, False
 
 
+def _video_path(video_dir: Path, level_name, env_config, episode: int, episodes: int) -> Path:
+    """算出这一回合该写到哪个文件。
+
+    只有一个回合时保持 ``1-1.mp4`` 这样的名字——绝大多数播放都是这种情况，
+    不该为了一个用不上的序号把常见路径改长。多回合时才追加 ``_ep2``，否则
+    同一关卡的第二个回合会把第一个覆盖掉。
+    """
+    stem = _level_short_name(level_name, env_config)
+    if episodes > 1:
+        stem = f"{stem}_ep{episode}"
+    return video_dir / f"{stem}.mp4"
+
+
 def _timestamped_dir(base: Path) -> Path:
     """在 base 下开一个以本地时间命名的新目录，让每次播放各存一份。
 
@@ -137,6 +150,9 @@ def play(config: AppConfig, catch_interrupt: bool = True) -> None:
     新开一个目录，好让同一模型的多场播放能并排比较。用 ``--no-show`` 可只录制
     不弹窗；没有显示器的环境（服务器 / SSH）会自动走这个行为。
 
+    ``config.play.episodes`` 决定每个关卡跑几个回合：多于 1 回合时文件名带
+    ``_epN`` 序号，免得后面几回合把第一回合的视频覆盖掉。
+
     停止方式：关掉显示窗口，或按 Ctrl+C——两者都会保住已录制的部分。
 
     Args:
@@ -149,12 +165,14 @@ def play(config: AppConfig, catch_interrupt: bool = True) -> None:
         return
 
     levels = config.env.levels or [None]
+    episodes = config.play.episodes
     base_dir = config.play.video_dir or (config.artifacts.save_root / "videos")
     # 训练侧自己按步数分好了目录，再来一层时间戳只是多余的套娃
     video_dir = _timestamped_dir(base_dir) if config.play.timestamp_videos else base_dir
     logger.info("视频输出目录: %s", video_dir)
     model = None
     viewer = _open_viewer(config.play)
+    stopped = False
 
     try:
         for level_idx, level_name in enumerate(levels, start=1):
@@ -169,28 +187,38 @@ def play(config: AppConfig, catch_interrupt: bool = True) -> None:
                 logger.info(f"模型已加载。已训练步数: {model.num_timesteps}")
 
             level_label = level_name or f"世界{config.env.world}-{config.env.level}"
-            video_path = video_dir / f"{_level_short_name(level_name, config.env)}.mp4"
-            logger.info(
-                "=== 播放关卡 %s（%d/%d）→ %s ===",
-                level_label, level_idx, len(levels), video_path,
-            )
 
-            viewer_closed = False
             try:
-                state, _ = env.reset()
-                with VideoRecorder(video_path, fps=config.play.video_fps) as recorder:
-                    total_reward, step, flag_get, viewer_closed = _run_episode(
-                        env, model, recorder, state, viewer
+                # 同一关卡连跑多回合时复用环境与显示窗口，只重置状态；
+                # 反复开关窗口会让画面每回合闪一下
+                for episode in range(1, episodes + 1):
+                    video_path = _video_path(
+                        video_dir, level_name, config.env, episode, episodes
                     )
                     logger.info(
-                        "关卡 %s：步数=%d，奖励=%.1f，通关=%s，已录制 %d 帧 → %s",
-                        level_label, step, total_reward, flag_get,
-                        recorder.frame_count, video_path,
+                        "=== 播放关卡 %s（%d/%d）第 %d/%d 回合 → %s ===",
+                        level_label, level_idx, len(levels), episode, episodes,
+                        video_path,
                     )
+
+                    state, _ = env.reset()
+                    with VideoRecorder(video_path, fps=config.play.video_fps) as recorder:
+                        total_reward, step, flag_get, viewer_closed = _run_episode(
+                            env, model, recorder, state, viewer
+                        )
+                        logger.info(
+                            "关卡 %s 第 %d 回合：步数=%d，奖励=%.1f，通关=%s，已录制 %d 帧 → %s",
+                            level_label, episode, step, total_reward, flag_get,
+                            recorder.frame_count, video_path,
+                        )
+
+                    if viewer_closed:
+                        stopped = True
+                        break
             finally:
                 env.close()
 
-            if viewer_closed:
+            if stopped:
                 logger.info("显示窗口已关闭，停止播放；已录制的视频保留在 %s", video_dir)
                 break
     except KeyboardInterrupt:

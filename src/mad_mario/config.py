@@ -98,6 +98,8 @@ class PlayConfig:
     # 视频再套一层时间戳目录，让每场播放各存一份、互不覆盖。训练侧录 best 模型
     # 时置 False：那边的 step_xxx 目录本身已经分好档了
     timestamp_videos: bool = True
+    # 每个关卡跑几个回合。大于 1 时视频文件名带回合序号，否则后一回合会覆盖前一回合
+    episodes: int = 1
 
 
 # ──────────────────────────────────────────────
@@ -455,7 +457,8 @@ def add_train_args(parser: argparse.ArgumentParser) -> None:
 
 def add_play_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--checkpoint", type=Path, default=None, help="要播放的 checkpoint")
-    parser.add_argument("--episodes", type=int, default=1, help="播放回合数")
+    parser.add_argument("--episodes", type=int, default=1,
+                        help="每个关卡播放的回合数，大于 1 时视频名带回合序号")
     parser.add_argument("--game", type=str, default=EnvConfig.game, help="游戏名称")
     parser.add_argument("--world", type=int, default=EnvConfig.world, help="世界/大关")
     parser.add_argument("--level", type=int, default=EnvConfig.level, help="关卡")
@@ -602,5 +605,7 @@ def config_from_play_args(args) -> AppConfig:
             video_dir=args.video_dir,
             video_fps=max(1, args.video_fps),
             show=args.show,
+            # 同理：0 或负数表示"一回合都不跑"，那等于什么都没播
+            episodes=max(1, args.episodes),
         ),
     )
