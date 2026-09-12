@@ -204,7 +204,7 @@ The directory is named after local start time (`YYYYMMDD_HHMMSS`); playing twice
 
 Every run records **the same playthrough**: playback takes the argmax action, and the emulator always resets Mario to the same starting state, so the same inputs produce the same trajectory frame for frame. Playing twice gives two byte-identical videos.
 
-`--sample` is what breaks that tie — it picks actions ε-greedily using the `exploration_rate` stored in the checkpoint, so each run diverges:
+`--sample` is what breaks that tie — it picks actions ε-greedily using the `exploration_rate` stored in the checkpoint, so each run diverges. It also reseeds the random number generator from OS entropy after loading: a checkpoint carries the training `seed` (this repository's stores `42`), and `DQN.load` replays it, which would otherwise make two separate runs sample the identical "random" sequence and produce byte-identical videos again:
 
 ```bash
 python -m mad_mario.cli play --checkpoint <model.zip> --levels 1-1 --sample

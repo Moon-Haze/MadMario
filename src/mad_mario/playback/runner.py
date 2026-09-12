@@ -11,6 +11,7 @@ import re
 import time
 from pathlib import Path
 
+import numpy as np
 from stable_baselines3 import DQN
 
 from mad_mario.config import AppConfig
@@ -112,6 +113,16 @@ def _run_episode(env, model, recorder, state, viewer=None, deterministic=True):
     return total_reward, step, flag_get, False
 
 
+def _reseed_for_sampling() -> None:
+    """把随机性交还给操作系统熵，让每次播放的采样序列都不同。
+
+    DQN.load 会用存档里的 seed（本项目是 42）重新播种 numpy，于是每个进程的
+    ε-greedy 序列逐位相同——"再跑一次换种打法"就成了空话。实测两次独立运行
+    开 --sample 产出的 mp4 md5 一致，正是这个原因。
+    """
+    np.random.seed(None)
+
+
 def _timestamped_dir(base: Path) -> Path:
     """在 base 下开一个以本地时间命名的新目录，让每次播放各存一份。
 
@@ -172,6 +183,9 @@ def play(config: AppConfig, catch_interrupt: bool = True) -> None:
                 model = DQN.load(str(checkpoint_path), device="auto")
                 logger.info(f"模型已加载。已训练步数: {model.num_timesteps}")
                 if sample_actions:
+                    # 必须在 load 之后：DQN.load 会拿存档里的 seed 重播 numpy，
+                    # 在那之前重新播种等于没播
+                    _reseed_for_sampling()
                     # 采样强度完全由 checkpoint 里的探索率决定，可能是 0.02 也可能
                     # 是训练中途的 1.0。打出来，免得画面糊了还以为是模型的问题
                     logger.info(

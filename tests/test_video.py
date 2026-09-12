@@ -72,6 +72,9 @@ class _FakeModel:
 
     deterministic_calls 记下每次推理传进来的 deterministic，用来验证
     --sample 确实改的是推理方式，而不只是改了个配置字段。
+
+    sampled 记下采样分支抽到的随机数：真 DQN 的 ε-greedy 走的是全局 numpy
+    随机流，这里照抄那条路径，才测得出"种子被按回固定值"这类问题。
     """
 
     num_timesteps = 1234
@@ -79,9 +82,12 @@ class _FakeModel:
 
     def __init__(self):
         self.deterministic_calls: list[bool] = []
+        self.sampled: list[float] = []
 
     def predict(self, state, deterministic=True):
         self.deterministic_calls.append(deterministic)
+        if not deterministic:
+            self.sampled.append(float(np.random.rand()))
         return 1, None
 
 
@@ -440,6 +446,58 @@ class TestSampleActions:
             runner_mod.play(config)
 
         assert "0.198" in caplog.text, "应把实际的 exploration_rate 记录下来"
+
+    def _make_load_reseeding_to_42(self, monkeypatch, runner_mod, model):
+        """让假 DQN.load 复刻真实行为：按存档里的 seed 重播全局 numpy。
+
+        存档 data 里存着 seed=42，BaseAlgorithm.__init__ 会拿它调用
+        set_random_seed。这不加复刻的话，单进程内连跑两次本来就序列不同，
+        这个 bug 根本测不出来——它只在"另起一个进程"时现形。
+        """
+
+        def _load(*args, **kwargs):
+            np.random.seed(42)
+            return model
+
+        monkeypatch.setattr(runner_mod, "DQN", SimpleNamespace(load=_load))
+
+    def test_each_fresh_load_still_samples_differently(self, tmp_path: Path, monkeypatch):
+        """核心承诺：另跑一次命令要能看到另一种打法。
+
+        这里每次都把种子按回 42（等价于另起一个进程加载模型），播两场必须
+        走出不同的采样序列，否则 --sample 只是换了个说法的重播。
+        """
+        model = _FakeModel()
+        runner_mod = _patch_play(monkeypatch, _make_env_factory(), model=model)
+        self._make_load_reseeding_to_42(monkeypatch, runner_mod, model)
+        config = _play_config(
+            tmp_path, levels=("SuperMarioBros-1-1-v0",), sample_actions=True
+        )
+
+        runner_mod.play(config)
+        first = list(model.sampled)
+        model.sampled.clear()
+        runner_mod.play(config)
+
+        assert first, "应至少采样过一次"
+        assert first != model.sampled, (
+            "每次加载后都该重新播种，两场播放的采样序列不该相同"
+        )
+
+    def test_greedy_leaves_the_rng_alone(self, tmp_path: Path, monkeypatch):
+        """贪心不抽随机数，就不该动全局随机流。
+
+        训练侧录最优模型是在训练进程里跑的，平白重播 numpy 会搅乱训练自身
+        的随机性。
+        """
+        seeded: list = []
+        monkeypatch.setattr(np.random, "seed", lambda *args: seeded.append(args))
+        runner_mod = _patch_play(monkeypatch, _make_env_factory())
+        config = _play_config(tmp_path, levels=("SuperMarioBros-1-1-v0",))
+
+        runner_mod.play(config)
+
+        assert seeded == [], "没开采样时不该重新播种"
 
 
 class TestPlayViewer:
