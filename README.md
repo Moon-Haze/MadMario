@@ -114,7 +114,7 @@ python -m mad_mario.cli play [options]
 | Argument | Default | Description |
 | -------- | ------- | ----------- |
 | `--checkpoint` | *(auto)* | Checkpoint to load and play. Auto-discovery looks in `<save-root>/<compat>/` for the newest periodic checkpoint, falling back to `mario_dqn_final.zip`; playback errors out if neither exists |
-| `--sample [N]` | *(off)* | Play each level `N` times with ε-greedily sampled actions instead of the argmax, recording one video per run (`1-1_run1.mp4`…). Bare `--sample` means `N=1` |
+| `--sample [N]` | *(off)* | Play each level `N` times with ε-greedily sampled actions instead of the argmax, naming each video after the exploration rate used (`1-1_0.198.mp4`). Bare `--sample` means `N=1` |
 | `--game` | `SuperMarioBros` | Gym environment game name |
 | `--world` | `1` | World / level pack number |
 | `--level` | `1` | Level number |
@@ -204,7 +204,7 @@ The directory is named after local start time (`YYYYMMDD_HHMMSS`); playing twice
 
 Every run records **the same playthrough**: playback takes the argmax action, and the emulator always resets Mario to the same starting state, so the same inputs produce the same trajectory frame for frame. Playing twice gives two byte-identical videos.
 
-`--sample N` is what breaks that tie — it plays each level `N` times, picking actions ε-greedily using the `exploration_rate` stored in the checkpoint, and records one video per run:
+`--sample N` is what breaks that tie — it plays each level `N` times, picking actions ε-greedily using the `exploration_rate` stored in the checkpoint:
 
 ```bash
 python -m mad_mario.cli play --checkpoint <model.zip> --levels 1-1 --sample 3
@@ -212,12 +212,14 @@ python -m mad_mario.cli play --checkpoint <model.zip> --levels 1-1 --sample 3
 
 ```text
 <save-root>/videos/20260912_143022/
-  1-1_run1.mp4      # 同一个模型，三种打法
-  1-1_run2.mp4
-  1-1_run3.mp4
+  1-1_0.198.mp4     # 文件名里的 0.198 就是这次用的探索率
 ```
 
-A bare `--sample` means `--sample 1`; the `_runN` suffix only appears when `N` is above 1, so single-run filenames stay plain. The runs of one level share a single environment instance — it is reset between them, which is what makes each run a fresh game rather than a continuation.
+A bare `--sample` means `--sample 1`. Greedy playback has no exploration rate to show, so it keeps the plain `1-1.mp4`; sampled playback stamps the rate it actually used into the filename, which is what makes an unusually wild clip traceable to a number rather than a mystery.
+
+Note that the rate is a **constant** for a given checkpoint, so all `N` runs of a level compute the same filename and only the last one survives. Playing the level several times over separate commands is what keeps each playthrough — the timestamped directory separates them. Playback logs a warning when `N` is above 1 so a missing clip never looks like a lost file.
+
+The runs of one level share a single environment instance — it is reset between them, which is what makes each run a fresh game rather than a continuation.
 
 `--sample` also reseeds the random number generator from OS entropy after loading: a checkpoint carries the training `seed` (this repository's stores `42`), and `DQN.load` replays it, which would otherwise make separate runs sample the identical "random" sequence and produce byte-identical videos again.
 

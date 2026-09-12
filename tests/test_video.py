@@ -11,6 +11,7 @@ import imageio.v2 as iio
 import numpy as np
 import pytest
 
+from mad_mario.playback.runner import _video_filename
 from mad_mario.playback.video import VideoRecorder
 
 
@@ -412,10 +413,10 @@ class TestTimestampedVideoDir:
 
 
 class TestSampleRuns:
-    """--sample N：每关按 ε-greedy 采样玩 N 遍，一遍一个视频。"""
+    """--sample N：每关按 ε-greedy 采样玩 N 遍。"""
 
-    def test_one_run_keeps_the_plain_filename(self, tmp_path: Path, monkeypatch):
-        """只跑一遍时不加后缀，免得给现有用法平添麻烦。"""
+    def test_sample_run_is_named_after_the_rate(self, tmp_path: Path, monkeypatch):
+        """采样播放的文件名带探索率，一眼看出这段画面有多随机。"""
         envs: list[_FakeEnv] = []
         runner_mod = _patch_play(monkeypatch, _make_env_factory(envs=envs))
         config = _play_config(
@@ -425,12 +426,37 @@ class TestSampleRuns:
         runner_mod.play(config)
 
         video_dir = tmp_path / "videos"
-        assert (video_dir / "1-1.mp4").exists()
-        assert not (video_dir / "1-1_run1.mp4").exists(), "单遍不该带后缀"
+        assert (video_dir / "1-1_0.198.mp4").exists()
+        assert not (video_dir / "1-1.mp4").exists(), "采样播放不该落成无后缀的名字"
         assert envs[0].resets == 1
 
-    def test_records_one_video_per_run(self, tmp_path: Path, monkeypatch):
-        """N 遍就要落 N 个文件——否则后一遍会覆盖前一遍。"""
+    def test_greedy_keeps_the_plain_filename(self, tmp_path: Path, monkeypatch):
+        """贪心没有探索率可言，文件名维持 1-1.mp4。"""
+        runner_mod = _patch_play(monkeypatch, _make_env_factory())
+        config = _play_config(tmp_path, levels=("SuperMarioBros-1-1-v0",))
+
+        runner_mod.play(config)
+
+        assert (tmp_path / "videos" / "1-1.mp4").exists()
+
+    def test_missing_rate_falls_back_to_the_plain_name(self):
+        """没有探索率可写时用朴素名字，而不是 1-1_nan.mp4。
+
+        非 DQN 模型（或日后换了策略）拿不到 exploration_rate，直接格式化会写出
+        nan 这种谁也看不懂的文件名。
+        """
+        env = SimpleNamespace(world=1, level=1)
+
+        assert _video_filename(None, env, None) == "1-1.mp4"
+        assert _video_filename(None, env, float("nan")) == "1-1.mp4"
+        assert _video_filename(None, env, 0.19761608882144843) == "1-1_0.198.mp4"
+
+    def test_runs_share_one_filename_and_the_last_wins(self, tmp_path: Path, monkeypatch):
+        """探索率是常数，N 遍因此同名，只有最后一遍留下来。
+
+        这是文件名方案（带探索率、不带序号）的既定取舍，钉死它免得日后有人
+        误以为是覆盖 bug 而"修"出个序号后缀。
+        """
         envs: list[_FakeEnv] = []
         runner_mod = _patch_play(monkeypatch, _make_env_factory(envs=envs))
         config = _play_config(
@@ -440,9 +466,24 @@ class TestSampleRuns:
         runner_mod.play(config)
 
         video_dir = tmp_path / "videos"
-        for idx in (1, 2, 3):
-            assert (video_dir / f"1-1_run{idx}.mp4").exists(), f"缺第 {idx} 遍的视频"
-        assert not (video_dir / "1-1.mp4").exists(), "多遍时不该再有无后缀的文件"
+        videos = list(video_dir.glob("*.mp4"))
+        assert [p.name for p in videos] == ["1-1_0.198.mp4"], (
+            f"三遍应只留一个文件，实际 {[p.name for p in videos]}"
+        )
+
+    def test_warns_that_earlier_runs_are_overwritten(
+        self, tmp_path: Path, monkeypatch, caplog
+    ):
+        """覆盖是静默的数据丢失，必须有一条日志说明，否则像是视频丢了。"""
+        runner_mod = _patch_play(monkeypatch, _make_env_factory())
+        config = _play_config(
+            tmp_path, levels=("SuperMarioBros-1-1-v0",), sample_runs=3
+        )
+
+        with caplog.at_level("WARNING"):
+            runner_mod.play(config)
+
+        assert "只有最后一遍的视频会留下" in caplog.text
 
     def test_each_run_resets_the_same_env(self, tmp_path: Path, monkeypatch):
         """同一关的各遍复用同一个 env：建环境很贵，reset() 本来就会重开一局。"""
@@ -460,7 +501,8 @@ class TestSampleRuns:
 
     def test_runs_apply_to_every_level(self, tmp_path: Path, monkeypatch):
         """多关卡时，每一关都跑满 N 遍。"""
-        runner_mod = _patch_play(monkeypatch, _make_env_factory())
+        envs: list[_FakeEnv] = []
+        runner_mod = _patch_play(monkeypatch, _make_env_factory(envs=envs))
         config = _play_config(
             tmp_path,
             levels=("SuperMarioBros-1-1-v0", "SuperMarioBros-1-2-v0"),
@@ -471,8 +513,8 @@ class TestSampleRuns:
 
         video_dir = tmp_path / "videos"
         for level in ("1-1", "1-2"):
-            for idx in (1, 2):
-                assert (video_dir / f"{level}_run{idx}.mp4").exists()
+            assert (video_dir / f"{level}_0.198.mp4").exists()
+        assert len(envs) == 2, "每个关卡各建一个环境，关内各遍复用"
 
     def test_every_run_samples(self, tmp_path: Path, monkeypatch):
         """N 遍都得走采样，不能只有第一遍采样、后面退回贪心。"""

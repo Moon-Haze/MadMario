@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 import logging
+import math
 import re
 import time
 from pathlib import Path
@@ -113,14 +114,17 @@ def _run_episode(env, model, recorder, state, viewer=None, deterministic=True):
     return total_reward, step, flag_get, False
 
 
-def _video_filename(level_name, env_config, run_idx: int, runs: int) -> str:
+def _video_filename(level_name, env_config, exploration_rate=None) -> str:
     """关卡视频文件名。
 
-    只跑一遍时用 1-1.mp4 这样的干净名字，采样多遍时带 _runN 后缀——否则后一遍
-    会把前一遍覆盖掉，而"每遍都不一样"正是要多跑几遍的全部意义。
+    采样播放时把探索率写进名字（1-1_0.198.mp4），一眼能看出这段画面是在多大的
+    随机强度下跑出来的；贪心播放没有探索率可言，用干净的 1-1.mp4。
     """
     base = _level_short_name(level_name, env_config)
-    return f"{base}.mp4" if runs == 1 else f"{base}_run{run_idx}.mp4"
+    # 探索率缺失（非 DQN 模型）时不写后缀，宁可名字朴素也别写出 1-1_nan.mp4
+    if exploration_rate is None or not math.isfinite(exploration_rate):
+        return f"{base}.mp4"
+    return f"{base}_{exploration_rate:.3f}.mp4"
 
 
 def _reseed_for_sampling() -> None:
@@ -177,11 +181,21 @@ def play(config: AppConfig, catch_interrupt: bool = True) -> None:
     # 没开采样就是贪心地跑一遍；两者共用同一个循环，省得代码里到处分岔
     runs = sample_runs or 1
     deterministic = sample_runs == 0
+    if sample_runs > 1:
+        # 探索率是 checkpoint 上的常数，N 遍因此算出同一个文件名，只有最后一遍
+        # 的视频留得下来。这不是 bug 而是文件名方案的取舍，但不说清楚会让人以为
+        # 视频莫名其妙丢了
+        logger.warning(
+            "采样 %d 遍但文件名只带探索率、不带序号，只有最后一遍的视频会留下；"
+            "想逐遍留存就分几次运行，时间戳目录会把各次播放隔开", runs,
+        )
     base_dir = config.play.video_dir or (config.artifacts.save_root / "videos")
     # 训练侧自己按步数分好了目录，再来一层时间戳只是多余的套娃
     video_dir = _timestamped_dir(base_dir) if config.play.timestamp_videos else base_dir
     logger.info("视频输出目录: %s", video_dir)
     model = None
+    # 采样播放时才有值，既进日志也进视频文件名
+    exploration_rate = None
     viewer = _open_viewer(config.play)
 
     try:
@@ -201,9 +215,12 @@ def play(config: AppConfig, catch_interrupt: bool = True) -> None:
                     _reseed_for_sampling()
                     # 采样强度完全由 checkpoint 里的探索率决定，可能是 0.02 也可能
                     # 是训练中途的 1.0。打出来，免得画面糊了还以为是模型的问题
+                    exploration_rate = float(
+                        getattr(model, "exploration_rate", float("nan"))
+                    )
                     logger.info(
                         "按 ε-greedy 采样动作玩 %d 遍：exploration_rate=%.3f，每遍轨迹都不同",
-                        runs, getattr(model, "exploration_rate", float("nan")),
+                        runs, exploration_rate,
                     )
 
             level_label = level_name or f"世界{config.env.world}-{config.env.level}"
@@ -218,7 +235,7 @@ def play(config: AppConfig, catch_interrupt: bool = True) -> None:
                 # 而 reset() 本来就会把游戏打回初始状态
                 for run_idx in range(1, runs + 1):
                     video_path = video_dir / _video_filename(
-                        level_name, config.env, run_idx, runs
+                        level_name, config.env, exploration_rate
                     )
                     progress = f"（第 {run_idx}/{runs} 遍）" if runs > 1 else ""
                     state, _ = env.reset()
