@@ -94,10 +94,15 @@ class SB3ArtifactConfig:
     save_freq: int = 100_000          # 每隔多少步保存一次 checkpoint
     save_replay_buffer: bool = False  # 保存经验回放缓冲区（文件很大）
     eval_freq: int = 10_000           # 每隔多少步执行一次评估
-    eval_episodes: int = 3            # 每个评估关卡跑几个回合
+    # 每个评估关卡跑几个回合。回合越多，评估均值的抖动越小，"最优"才越可信；
+    # 代价是每次评估更慢，而评估是阻塞训练的
+    eval_episodes: int = 10
     # 评估覆盖几个训练关卡（从训练关卡集里等距抽取，确定性）。评估总回合数 =
     # 本值 × eval_episodes。置 1 即退回"只评一关"的旧行为
     eval_levels: int = 3
+    # 刷新最优模型的门槛：新评估要比已采纳的最优高出这个比例才算数（0.05 = 5%）。
+    # 不设门槛的话，评估噪声的每个小波峰都会存一次盘、录一次视频
+    best_min_improvement: float = 0.05
     log_interval: int = 20            # 每隔多少 episode 输出日志+刷新图表
     num_envs: int = max(1, (os.cpu_count() or 2) // 2)
 
@@ -110,7 +115,7 @@ class PlayConfig:
     video_dir: Path | None = None   # None 表示用 save_root/videos
     video_fps: int = 15             # 对应 frame_skip=4 时的真实播放速度
     show: bool = True               # 同时弹窗实时显示；无 GUI 环境会自动降级
-    play_on_best: bool = True       # 训练中每次刷新最优模型就录一次视频
+    play_on_best: bool = True       # 最优模型刷新到够格时录一次视频（门槛见 best_min_improvement）
     # 视频再套一层时间戳目录，让每场播放各存一份、互不覆盖。训练侧录 best 模型
     # 时置 False：那边的 step_xxx 目录本身已经分好档了
     timestamp_videos: bool = True
@@ -446,6 +451,10 @@ def add_train_args(parser: argparse.ArgumentParser) -> None:
                      help="每个评估关卡跑几个回合")
     art.add_argument("--eval-levels", type=int, default=SB3ArtifactConfig.eval_levels,
                      help="评估覆盖的训练关卡数（等距抽取）；评估总回合数 = 关卡数 × --eval-episodes")
+    art.add_argument("--best-min-improvement", type=float,
+                     default=SB3ArtifactConfig.best_min_improvement,
+                     help="刷新最优模型的门槛：新评估要比当前最优高出这个比例才算数"
+                          "（0.05 = 5%%）；调小则更容易刷新，0 即退回旧行为")
     art.add_argument("--save-freq", type=int, default=SB3ArtifactConfig.save_freq,
                      help="每隔多少步保存一次 checkpoint")
     art.add_argument("--no-play-best", dest="play_on_best", action="store_false",
@@ -594,6 +603,8 @@ def config_from_train_args(args) -> AppConfig:
         eval_freq=args.eval_freq,
         eval_episodes=args.eval_episodes,
         eval_levels=max(1, args.eval_levels),
+        # 负门槛等于"随便高一点就算最优"，比不设门槛还糟，下界卡在 0
+        best_min_improvement=max(0.0, args.best_min_improvement),
         log_interval=args.log_interval,
         log_level=args.log_level,
     )
