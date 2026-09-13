@@ -92,8 +92,9 @@ python -m mad_mario.cli play [options]
 | `--save-freq` | `100000` | Save a periodic checkpoint every N environment steps |
 | `--num-envs` | `cpus // 2` | Number of parallel environments |
 | `--eval-freq` | `10000` | Run a greedy evaluation every N environment steps. Each evaluation runs `eval-levels × --eval-episodes` episodes |
-| `--eval-episodes` | `3` | Episodes per evaluation level |
+| `--eval-episodes` | `10` | Episodes per evaluation level. More episodes mean a steadier mean, so "best" means more |
 | `--eval-levels` | `3` | How many training levels the evaluation covers, picked evenly from the training set. Set to `1` for the old single-level behaviour |
+| `--best-min-improvement` | `0.05` | How much better than the current best a new evaluation must score to count as a refresh (0.05 = 5%). `0` restores the old "any improvement counts" behaviour |
 | `--no-play-best` | *(flag)* | Skip the automatic recording whenever a new best model is saved (on by default) |
 | `--log-interval` | `20` | Log metrics and refresh charts every N episodes |
 | `--log-level` | `info` | Log level — choices: `debug`, `info`, `warning`, `error` |
@@ -283,6 +284,7 @@ checkpoints/<compat>/
     best_model.zip
   best_model_videos/
     step_000160000/      # 第 16 万步刷新时的录制
+      best_model.zip     # 当时那份权重，和视频放在一起
       1-1.mp4
       1-2.mp4
     step_000830000/
@@ -291,7 +293,11 @@ checkpoints/<compat>/
 
 The `step_XXXX` directory name is the step count when the best score improved, so clips from different stages of training can be compared side by side. These directories are stamped by training step rather than by wall-clock time — the timestamped-directory scheme described above applies to the `play` command only. Recording uses unshaped playback settings (reward shaping and the stuck penalty off, stuck rescue still on) — it shows what the agent has actually learned, not what the training rewards push it toward.
 
-Recording failures only log a warning and never interrupt training: a full disk or a broken encoder does not cost you the run. Pass `--no-play-best` to turn the automatic recording off entirely; evaluation and best-model saving are unaffected.
+A new evaluation has to beat the current best by `--best-min-improvement` (5% by default) before it counts. Without that bar, every little wobble in the evaluation noise saves a checkpoint and records a full set of clips over all the levels. A gain below the bar is discarded outright rather than kept as a new baseline, so the bar is always measured against the best model actually adopted — otherwise `best_mean_reward` would drift up on noise and the next real improvement would fail to clear it. The model file is copied into its `step_XXXX` directory at that moment, because `best_model.zip` itself is overwritten in place by the next refresh and the background recording may not have read it yet.
+
+Recording runs on a background thread with a queue, so the training loop never waits for it — a single recording pass plays every level end to end, and blocking the main loop for that long would stretch the evaluation interval several times over. Refreshes that arrive while a recording is still running queue up behind it and are recorded in order. Training end waits for the queue to drain before returning: an mp4 keeps its index at the end of the file, so exiting mid-write leaves a clip that no player will open.
+
+Recording failures only log a warning and never interrupt training: a full disk or a broken encoder does not cost you the run, and it does not drop the recordings queued behind it. Pass `--no-play-best` to turn the automatic recording off entirely; evaluation and best-model saving are unaffected.
 
 ## Output Files
 
@@ -304,7 +310,9 @@ checkpoints/worlds-1-8-v0_right_only/
   best_model/
     best_model.zip             # 评估成绩最好的模型
   best_model_videos/           # 最优模型刷新时的自动录制（见上）
-    step_000160000/1-1.mp4
+    step_000160000/
+      best_model.zip           # 当时那份权重的副本
+      1-1.mp4
   eval_logs/
     evaluations.npz            # 每次评估的奖励/长度
   tensorboard/

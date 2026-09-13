@@ -227,8 +227,9 @@ def train(config: AppConfig, log_path: Path | None = None) -> None:
         verbose=1,
     )
 
-    # 评估回调（SB3 内置逻辑：保存 best model + 记录评估日志），并在最优模型
-    # 刷新时顺带录一段视频；--no-play-best 可关掉录制，评估本身不受影响
+    # 评估回调（SB3 内置的评估与日志逻辑），负责保存 best model，并在最优模型
+    # 刷新到够格时把它排进后台录制队列；--no-play-best 可关掉录制，评估本身
+    # 不受影响。刷新门槛见 --best-min-improvement
     eval_levels = _select_eval_levels(config)
     eval_env = SubprocVecEnv(
         [lambda thunk=thunk: Monitor(thunk()) for thunk in _make_eval_thunks(config)]
@@ -248,6 +249,7 @@ def train(config: AppConfig, log_path: Path | None = None) -> None:
         # verbose=0 静默评估打印；best model / eval_logs / tensorboard 记录不受影响
         verbose=0,
         train_config=config,
+        min_improvement=config.artifacts.best_min_improvement,
     )
 
     # 自定义指标回调（CSV + PNG 图表 + Mario 特有指标）
@@ -284,4 +286,7 @@ def train(config: AppConfig, log_path: Path | None = None) -> None:
             logger.info("最终模型已保存到 %s", final_path)
             logger.info("训练完成。")
     finally:
+        # 后台录制线程还在往 mp4 里写：先等它把队列清空再收环境，否则进程带着
+        # 写了一半的文件退出，播放器连打开都打不开
+        eval_callback.wait_for_recording()
         env.close()

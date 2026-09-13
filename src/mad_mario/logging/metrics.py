@@ -5,6 +5,9 @@ from collections import deque
 from pathlib import Path
 
 import matplotlib
+# 本模块只把曲线写成 PNG，从不开窗口，需要非交互后端。后端必须由入口在 pyplot
+# 首次导入之前定好（cli._use_headless_backend），到这里再改已经晚了——TkAgg
+# 下主线程建出的 Tk 对象，会被训练里那个录制最优模型的后台线程的 GC 回收
 import matplotlib.pyplot as plt
 import numpy as np
 import torch
