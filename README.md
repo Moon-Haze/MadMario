@@ -81,7 +81,7 @@ python -m mad_mario.cli play [options]
 | `--exploration-initial-eps` | `1.0` | Initial ε |
 | `--exploration-final-eps` | `0.02` | Final ε |
 | `--max-grad-norm` | `10.0` | Gradient clipping max norm |
-| `--seed` | `42` | Random seed |
+| `--seed` | `42` | Random seed; also determines which level each parallel env gets in multi-level training |
 | `--n-steps` | `1` | n-step return horizon; values > 1 switch SB3 to `NStepReplayBuffer` |
 | **Checkpoint & Logging** | | |
 | `--save-root` | `checkpoints` | Checkpoint root directory |
@@ -335,7 +335,7 @@ The four `latest_*.png` charts are redrawn every `--log-interval` episodes and r
 | ----------------------------------------- | -------------------------------------------------------------- |
 | `src/mad_mario/cli.py`                    | Command-line entry point; dispatches to `train` and `play`     |
 | `src/mad_mario/config.py`                 | Argument parsing, config dataclasses, checkpoint resolution    |
-| `src/mad_mario/env/factory.py`            | Mario environment and vector environment creation              |
+| `src/mad_mario/env/factory.py`            | Mario environment creation                                       |
 | `src/mad_mario/env/wrappers.py`           | Environment preprocessing wrappers                             |
 | `src/mad_mario/training/trainer.py`       | SB3 DQN assembly, callbacks, and the training loop             |
 | `src/mad_mario/training/best_playback.py` | Records a video whenever the evaluation finds a new best model |

@@ -27,20 +27,24 @@ from mad_mario.training.best_playback import BestModelPlaybackCallback
 logger = logging.getLogger(__name__)
 
 
+def _assign_levels(config: AppConfig) -> list[str | None]:
+    """给每个并行环境分配一个关卡，多关卡时按 ``--seed`` 播种抽取。
+
+    分配此前用全局 ``random``：seed 只进 SB3 的构造器，管不到这里，
+    同 seed 两次运行会分出不同的环境组合，可复现性在第一步就断了。
+    单关卡（或未启用 ``levels``）时全为 ``None``，``_env_thunk`` 改读
+    ``world`` / ``level``。
+    """
+    levels = config.env.levels
+    if levels and len(levels) > 1:
+        rng = random.Random(config.sb3.seed)
+        return [rng.choice(levels) for _ in range(config.artifacts.num_envs)]
+    return [None] * config.artifacts.num_envs
+
+
 def _make_env_thunks(config: AppConfig) -> list[callable]:
     """为并行环境创建 env thunk 列表，支持多关卡分配。"""
-    levels = config.env.levels
-    num_envs = config.artifacts.num_envs
-
-    if levels and len(levels) > 1:
-        # 多关卡训练：每个子环境随机分配一个关卡
-        thunks = []
-        for _ in range(num_envs):
-            level_name = random.choice(levels)
-            thunks.append(_env_thunk(config.env, level_name))
-        return thunks
-    else:
-        return [_env_thunk(config.env) for _ in range(num_envs)]
+    return [_env_thunk(config.env, level) for level in _assign_levels(config)]
 
 
 def _env_thunk(env_config, level_name: str | None = None):

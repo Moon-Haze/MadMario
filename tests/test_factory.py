@@ -1,4 +1,4 @@
-"""测试 env/factory.py——环境创建和关卡选择。"""
+"""测试 env/factory.py——环境创建。"""
 
 from __future__ import annotations
 
@@ -6,7 +6,7 @@ import gymnasium as gym
 import pytest
 
 from mad_mario.config import EnvConfig
-from mad_mario.env.factory import _select_levels, make_mario_env
+from mad_mario.env.factory import make_mario_env
 
 
 class TestMakeMarioEnv:
@@ -62,24 +62,3 @@ class TestMakeMarioEnv:
             assert "x_pos" in info or True  # gym-smb 通常会有
         finally:
             env.close()
-
-
-class TestSelectLevels:
-    def test_single_level(self):
-        """单关卡时应返回全 None。"""
-        cfg = EnvConfig()
-        levels = _select_levels(4, cfg)
-        assert levels == [None] * 4
-
-    def test_multi_levels(self):
-        """多关卡时应从列表中随机选择。"""
-        cfg = EnvConfig(levels=["1-1", "1-2", "1-3"])
-        levels = _select_levels(10, cfg)
-        assert len(levels) == 10
-        for lv in levels:
-            assert lv in ("1-1", "1-2", "1-3")
-
-    def test_no_config(self):
-        """config 为 None 时应返回全 None。"""
-        levels = _select_levels(3, None)
-        assert levels == [None] * 3

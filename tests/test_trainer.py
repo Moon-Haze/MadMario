@@ -14,6 +14,7 @@ from stable_baselines3.common.utils import LinearSchedule
 from mad_mario.config import AppConfig, EnvConfig, SB3ArtifactConfig, SB3Config
 from mad_mario.training.trainer import (
     _apply_exploration_schedule,
+    _assign_levels,
     _make_eval_thunks,
     _resume_hyperparams,
     _resolve_exploration_fraction,
@@ -21,12 +22,42 @@ from mad_mario.training.trainer import (
 )
 
 
-def _app_config(*, levels=None, eval_levels=3, world=1, level=1) -> AppConfig:
+def _app_config(*, levels=None, eval_levels=3, world=1, level=1, seed=42, num_envs=4) -> AppConfig:
     return AppConfig(
         env=EnvConfig(world=world, level=level, levels=levels),
-        sb3=SB3Config(),
-        artifacts=SB3ArtifactConfig(eval_levels=eval_levels),
+        sb3=SB3Config(seed=seed),
+        artifacts=SB3ArtifactConfig(eval_levels=eval_levels, num_envs=num_envs),
     )
+
+
+class TestAssignLevels:
+    """多关卡分配必须吃 seed：--seed 决定每个子环境分到哪一关。
+
+    此前分配走全局 random，seed 只进 SB3 构造器管不到这里，同 seed
+    两次运行分出不同的环境组合——可复现性在第一步就断了。
+    """
+
+    LEVELS = ["1-1", "1-2", "1-3", "1-4"]
+
+    def test_same_seed_same_assignment(self):
+        cfg = _app_config(levels=self.LEVELS)
+        assert _assign_levels(cfg) == _assign_levels(cfg)
+
+    def test_different_seed_reshuffles(self):
+        """两个 seed 各抽 12 次：序列全同的概率是 (1/4)^12，可忽略。"""
+        a = _assign_levels(_app_config(levels=self.LEVELS, seed=1, num_envs=12))
+        b = _assign_levels(_app_config(levels=self.LEVELS, seed=2, num_envs=12))
+        assert a != b
+
+    def test_draws_from_levels_only(self):
+        assigned = _assign_levels(_app_config(levels=self.LEVELS, num_envs=16))
+        assert len(assigned) == 16
+        assert set(assigned) <= set(self.LEVELS)
+
+    def test_single_level_returns_none_per_env(self):
+        """单关卡（或未启用 levels）时全 None，_env_thunk 改读 world/level。"""
+        assert _assign_levels(_app_config(num_envs=4)) == [None] * 4
+        assert _assign_levels(_app_config(levels=["1-1"], num_envs=4)) == [None] * 4
 
 
 class TestResolveExplorationFraction:
