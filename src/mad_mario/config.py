@@ -4,7 +4,7 @@ import argparse
 import json
 import os
 import sys
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 
 
@@ -19,11 +19,9 @@ class EnvConfig:
     version: int = 0
     levels: list[str] | None = None
     worlds: list[int] | None = None
-    state_dim: tuple[int, int, int] = (4, 84, 84)
     frame_skip: int = 4
     frame_stack: int = 4
     resize_shape: int = 84
-    render_mode: str | None = None
     movement: str = "right_only"
     # 默认关闭：裁剪把 ±1 之外的奖励一律压平，−25 的死亡惩罚被砍成 −1、
     # 每步约 +7 的前进奖励被砍成 +1，原生奖励的区分度基本丢光
@@ -44,6 +42,28 @@ class EnvConfig:
     score_reward_scale: float = 0.01
     flag_reward_enabled: bool = True
     flag_reward_value: float = 50.0
+
+
+def playback_env_config(config: EnvConfig) -> EnvConfig:
+    """播放语义的环境配置：观赏，不是继续训练。
+
+    关掉全部奖励塑形（裁剪 / 进度 / 得分 / 通关）与卡住惩罚——视频里要看的是
+    模型的原生表现；保留卡住脱困，否则模型卡住时画面会一直僵着。观测变换与
+    训练保持一致（形状对不上权重就白加载了）。
+
+    "播放栈是什么"在此单点定义（EnvConfig 的伴生变换；wrapper 组装顺序归
+    factory，两层知识各守各的）：命令行播放 config_from_play_args 与训练内
+    最优录制 best_playback 都指名调用，不再各自改写六个布尔。
+    """
+    return replace(
+        config,
+        clip_rewards=False,
+        stuck_penalty_enabled=False,
+        stuck_rescue_enabled=True,
+        progress_reward_enabled=False,
+        score_reward_enabled=False,
+        flag_reward_enabled=False,
+    )
 
 
 # ──────────────────────────────────────────────
@@ -234,73 +254,13 @@ def _expand_level(level_id: str, game: str = "SuperMarioBros", version: int = 0)
     return build_env_name(game, *map(int, level_id.split("-")), version)
 
 
-def _format_worlds(worlds: list[int]) -> str:
-    """将世界号列表格式化为紧凑字符串。
-
-    连续范围用 ``-``（如 1-8），非连续用 ``,``（如 1,3,5）。
-    单个值直接返回数字。
-    """
-    if len(worlds) == 1:
-        return str(worlds[0])
-    # 检查是否连续
-    is_consecutive = all(worlds[i] + 1 == worlds[i + 1] for i in range(len(worlds) - 1))
-    if is_consecutive:
-        return f"{worlds[0]}-{worlds[-1]}"
-    return ",".join(str(w) for w in worlds)
-
-
-def compatible_save_root(save_root: Path, config: EnvConfig) -> Path:
-    if config.worlds and len(config.worlds) > 1:
-        worlds_str = _format_worlds(config.worlds)
-        folder = f"worlds-{worlds_str}-v{config.version}_{config.movement}"
-    elif config.levels and len(config.levels) > 1:
-        folder = f"multi-v{config.version}_{config.movement}"
-    else:
-        folder = f"{config.world}-{config.level}-v{config.version}_{config.movement}"
-    return save_root / folder
-
-
-def _checkpoint_steps(path: Path) -> int:
-    """从 ``mario_dqn_<steps>_steps.zip`` 文件名解析训练步数；解析失败返回 -1。"""
-    stem = path.stem
-    if not (stem.startswith("mario_dqn_") and stem.endswith("_steps")):
-        return -1
-    try:
-        return int(stem.split("_")[2])
-    except (IndexError, ValueError):
-        return -1
-
-
-def resolve_checkpoint(config: SB3ArtifactConfig) -> Path | None:
-    """解析 SB3 checkpoint 路径。
-
-    SB3 使用 .zip 格式，查找顺序：
-    1. config.checkpoint（用户指定）
-    2. save_root 或 save_root/snapshots/ 中步数最大的 mario_dqn_*_steps.zip
-    3. save_root / "mario_dqn_final.zip"（仅在没有周期档时兜底）
-    """
-    if not config.resume:
-        return None
-    if config.checkpoint is not None:
-        return config.checkpoint
-
-    save_root = config.save_root
-
-    # 周期档可能位于 save_root 或 save_root/snapshots/ 子目录，选训练步数最大者
-    # （步数比修改时间更能代表训练进度，也避免同目录混入多条训练序列时挑错档）
-    candidates = list(save_root.glob("mario_dqn_*_steps.zip"))
-    snapshots_dir = save_root / "snapshots"
-    if snapshots_dir.is_dir():
-        candidates.extend(snapshots_dir.glob("mario_dqn_*_steps.zip"))
-    if candidates:
-        return max(candidates, key=_checkpoint_steps)
-
-    # 没有周期档时，回退到收尾生成的最终 checkpoint
-    final = save_root / "mario_dqn_final.zip"
-    if final.exists():
-        return final
-
-    return None
+# 磁盘发现与目录命名策略已迁往 artifacts.py；这里保留转发导入，组装器与
+# 老调用方（trainer / cli / tests）不必一次性改地址
+from mad_mario.artifacts import (  # noqa: E402
+    _format_worlds,
+    compatible_save_root,
+    resolve_checkpoint,
+)
 
 
 # ──────────────────────────────────────────────
@@ -514,7 +474,6 @@ def add_play_args(parser: argparse.ArgumentParser) -> None:
                         help="多世界播放，逗号分隔和范围如 1-3,5,7-8")
     parser.add_argument("--movement", choices=("right_only", "simple", "complex"),
                         default=EnvConfig.movement, help="动作空间预设")
-    parser.add_argument("--render-mode", default="rgb_array", help="环境渲染模式")
     parser.add_argument("--save-root", type=Path, default=SB3ArtifactConfig.save_root,
                         help="输出根目录")
     parser.add_argument("--flat-save-root", action="store_true",
@@ -627,22 +586,16 @@ def config_from_play_args(args) -> AppConfig:
     elif args.levels:
         levels = [_expand_level(lv, game=args.game, version=args.version) for lv in args.levels]
 
-    env_config = EnvConfig(
+    # 播放语义（关塑形与惩罚、留脱困）由 playback_env_config 单点定义，这里只指名获取
+    env_config = playback_env_config(EnvConfig(
         game=args.game,
         world=args.world,
         level=args.level,
         version=args.version,
-        render_mode=args.render_mode,
         movement=args.movement,
         levels=levels,
         worlds=worlds,
-        clip_rewards=False,
-        stuck_penalty_enabled=False,
-        stuck_rescue_enabled=True,
-        progress_reward_enabled=False,
-        score_reward_enabled=False,
-        flag_reward_enabled=False,
-    )
+    ))
     save_root = args.save_root if args.flat_save_root else compatible_save_root(args.save_root, env_config)
 
     checkpoint = args.checkpoint or resolve_checkpoint(

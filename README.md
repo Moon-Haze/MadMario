@@ -143,7 +143,6 @@ global step instead.
 | `--level` | `1` | Level number |
 | `--version` | `0` | Environment version suffix |
 | `--movement` | `right_only` | Action space preset — choices: `right_only`, `simple`, `complex` |
-| `--render-mode` | `rgb_array` | Environment render mode — playback always records, so it is forced to `rgb_array` |
 | `--save-root` | `checkpoints` | Output root directory |
 | `--flat-save-root` | *(flag)* | Use save-root directly without subdirectory |
 | `--video-dir` | `<save-root>/videos` | Parent directory for recorded videos; a timestamped subdirectory is created inside it |
@@ -264,7 +263,7 @@ The window is paced at `--video-fps`, so what you watch matches the video's play
 
 It stops when you close the window or press `Ctrl+C`; either way the partial recording is kept.
 
-Video needs pixel frames, so playback always forces `rgb_array` rendering regardless of `--render-mode`. A clip contains one frame per agent step plus the opening frame, so its length is `steps / video_fps` seconds.
+Video needs pixel frames, so playback always forces `rgb_array` rendering. A clip contains one frame per agent step plus the opening frame, so its length is `steps / video_fps` seconds.
 
 Pass `--no-show` to record without a window — that is also what happens automatically on a machine with no display (a server or an SSH session), where playback logs a warning and records the video only. Either way each frame is rendered once and used for both output.
 

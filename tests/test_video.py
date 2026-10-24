@@ -1,4 +1,9 @@
-"""测试 playback/video.py 的录制器，以及 playback.runner.play 的录制接线。"""
+"""测试 playback/video.py 的录制器，以及 PlaybackSession 的编排接线。
+
+协作者（模型加载、环境工厂、显示窗口、线程额度）在构造期注入，不再 patch
+模块全局；仍在 patch 的只有 matplotlib 的窗口后端探测——那是 _open_viewer
+自己的环境依赖，不是编排协作者。
+"""
 
 from __future__ import annotations
 
@@ -12,11 +17,14 @@ import imageio.v2 as iio
 import numpy as np
 import pytest
 
+import mad_mario.playback.runner as runner_mod
 from mad_mario.playback.runner import (
+    PlaybackSession,
     _playback_threads,
     _rate_dirname,
     _unique_path,
     _video_filename,
+    play,
 )
 from mad_mario.playback.video import VideoRecorder
 
@@ -75,7 +83,7 @@ class TestVideoRecorder:
 
 
 class _FakeModel:
-    """只提供 play() 用到的那几个成员。
+    """只提供会话用到的那几个成员。
 
     deterministic_calls 记下每次推理传进来的 deterministic，用来验证
     --sample 确实改的是推理方式，而不只是改了个配置字段。
@@ -83,7 +91,7 @@ class _FakeModel:
     sampled 记下采样分支抽到的随机数：真 DQN 的 ε-greedy 走的是全局 numpy
     随机流，这里照抄那条路径，才测得出"种子被按回固定值"这类问题。
 
-    rates_used 记下每次推理时模型身上的 exploration_rate：play() 是改写这个
+    rates_used 记下每次推理时模型身上的 exploration_rate：会话是改写这个
     属性来切换每遍的随机强度的，记下来才能验证文件名里的数字与实际用的是
     同一个值，而不是各写各的。
 
@@ -156,7 +164,7 @@ class _FakeEnv:
 class _FakeViewer:
     """假窗口：只记下被送了几帧、有没有被关上。
 
-    默认 show=False 的测试用不到它；开启显示的测试靠它避开真实 matplotlib。
+    默认无窗口的测试用不到它；开启显示的测试靠它避开真实 matplotlib。
     close_after 不为 None 时，在第该次 show() 后把自己标记为已关闭，用来
     模拟用户中途关窗。
     """
@@ -189,7 +197,7 @@ def _play_config(
     timestamp_videos: bool = False,
     sample_runs: int = 0,
 ):
-    """构造 play() 需要的最小配置，并落下 checkpoint 文件让存在性检查通过。
+    """构造 run() 需要的最小配置，并落下 checkpoint 文件让存在性检查通过。
 
     show 默认 False：录制相关的测试不该顺带拉起 matplotlib。
     timestamp_videos 默认 False：多数测试关心的是"哪个关卡落到哪个文件"，直接
@@ -227,10 +235,10 @@ def _make_env_factory(
     render_modes: list | None = None,
     barrier: threading.Barrier | None = None,
 ):
-    """造一个假环境工厂，顺带记录 play() 传入的 render_mode。
+    """造一个假环境工厂，顺带记录会话传入的 render_mode。
 
-    play() 以 make_mario_env(config, render_mode=..., level_name=...) 调用，
-    签名必须对得上，否则测试会以 TypeError 失败而不是断言失败。
+    会话以 make_env(config, render_mode=..., level_name=...) 调用，签名必须
+    对得上，否则测试会以 TypeError 失败而不是断言失败。
     传 env 则每次返回同一个对象，否则每次新建一个；barrier 转交给新建的环境，
     用于卡住并发播放。
     """
@@ -246,59 +254,66 @@ def _make_env_factory(
     return _factory
 
 
-def _patch_play(
-    monkeypatch,
-    env_factory,
-    model: _FakeModel | None = None,
-    models: list[_FakeModel] | None = None,
-):
-    """把 play() 的模型加载与环境创建都换成假的。
+def _model_loader(model: _FakeModel | None = None, models: list | None = None):
+    """假加载器：每次调用发一份新 _FakeModel，收集进 models。
 
-    补丁打在 playback.runner 上而不是 cli 上：play() 实现住在 runner 里，
-    cli 只是转发调用，改 cli 的属性影响不到真正的执行路径。
-
-    每次 DQN.load 都发一份新的假模型，收集进 models：并发播放时每个线程各
-    加载一份，共用一个实例会让 exploration_rate 在线程之间打架，断言也就无从
-    谈起。传 model 则让它充当"第一次加载"的产物，供只加载一次的串行播放做
-    单模型断言。
+    并发播放时每个线程各加载一份，共用一个实例会让 exploration_rate 在线程
+    之间打架，断言也就无从谈起。传 model 则让它充当"第一次加载"的产物，供只
+    加载一次的串行播放做单模型断言。
     """
-    import mad_mario.playback.runner as runner_mod
+    loaded = models if models is not None else []
 
-    loaded: list[_FakeModel] = [] if models is None else models
-
-    def _load(*args, **kwargs):
+    def _load(path):
         fresh = model if (model is not None and not loaded) else _FakeModel()
         loaded.append(fresh)
         return fresh
 
-    monkeypatch.setattr(runner_mod, "DQN", SimpleNamespace(load=_load))
-    monkeypatch.setattr(runner_mod, "make_mario_env", env_factory)
-    return runner_mod
+    return _load
 
 
-def _force_window(monkeypatch, runner_mod, **kwargs) -> _FakeViewer:
-    """给 play() 塞一个假窗口，把它按回串行那条路。
+def _session(
+    env_factory,
+    model: _FakeModel | None = None,
+    models: list | None = None,
+    open_viewer=None,
+    thread_count=None,
+) -> PlaybackSession:
+    """构造注入的假会话：协作者从接缝传入。
+
+    open_viewer 默认给"无窗口"（各趟并发跑）；要测窗口语义时自传，或用
+    PlaybackSession 的生产默认 _open_viewer（TestPlayViewer 那样 patch 它的
+    环境依赖）。
+    """
+    return PlaybackSession(
+        load_model=_model_loader(model, models),
+        make_env=env_factory,
+        open_viewer=open_viewer or (lambda play_config: None),
+        thread_count=thread_count,
+    )
+
+
+def _force_window(session_kwargs: dict, **kwargs) -> _FakeViewer:
+    """把会话按回串行那条路的假窗口，用法：_session(..., **_force_window({}))。
 
     没有窗口时各趟是摊到线程上并发跑的，凡是断言"环境被复用""这一遍接着那
-    一遍"这类顺序语义的测试，都得先有窗口才谈得上。直接替换 _open_viewer，
-    与配置里的 show 无关——这里要的是"有没有窗口"，不是"窗口从哪来"。
+    一遍"这类顺序语义的测试，都得先有窗口才谈得上。
     """
     viewer = _FakeViewer(**kwargs)
-    monkeypatch.setattr(runner_mod, "_open_viewer", lambda play_config: viewer)
+    session_kwargs["open_viewer"] = lambda play_config: viewer
     return viewer
 
 
 class TestPlayRecording:
-    """play() 的录制接线：不碰真实环境、模型与显示器。"""
+    """PlaybackSession 的录制接线：不碰真实环境、模型与显示器。"""
 
-    def test_writes_one_video_per_level(self, tmp_path: Path, monkeypatch):
+    def test_writes_one_video_per_level(self, tmp_path: Path):
         envs: list[_FakeEnv] = []
-        runner_mod = _patch_play(monkeypatch, _make_env_factory(envs=envs))
+        session = _session(_make_env_factory(envs=envs))
         config = _play_config(
             tmp_path, levels=("SuperMarioBros-1-1-v0", "SuperMarioBros-1-2-v0")
         )
 
-        runner_mod.play(config)
+        session.run(config)
 
         video_dir = tmp_path / "videos"
         assert (video_dir / "1-1.mp4").exists(), "每个关卡各一个文件"
@@ -306,114 +321,150 @@ class TestPlayRecording:
         assert len(envs) == 2
         assert all(env.closed for env in envs), "每个关卡的环境都要关掉"
 
-    def test_video_filename_uses_level_short_name(self, tmp_path: Path, monkeypatch):
+    def test_video_filename_uses_level_short_name(self, tmp_path: Path):
         """文件名应是 1-1 这样的短名，而不是完整的环境名。"""
-        runner_mod = _patch_play(monkeypatch, _make_env_factory())
+        session = _session(_make_env_factory())
         config = _play_config(tmp_path, levels=("SuperMarioBros-1-1-v0",))
 
-        runner_mod.play(config)
+        session.run(config)
 
         video_dir = tmp_path / "videos"
         assert (video_dir / "1-1.mp4").exists()
         assert not (video_dir / "SuperMarioBros-1-1-v0.mp4").exists()
 
-    def test_honours_video_dir_override(self, tmp_path: Path, monkeypatch):
+    def test_honours_video_dir_override(self, tmp_path: Path):
         custom = tmp_path / "elsewhere"
-        runner_mod = _patch_play(monkeypatch, _make_env_factory())
+        session = _session(_make_env_factory())
         config = _play_config(tmp_path, levels=("SuperMarioBros-1-1-v0",), video_dir=custom)
 
-        runner_mod.play(config)
+        session.run(config)
 
         assert (custom / "1-1.mp4").exists(), "应使用 --video-dir 指定的目录"
 
-    def test_forces_rgb_array_render_mode(self, tmp_path: Path, monkeypatch):
+    def test_forces_rgb_array_render_mode(self, tmp_path: Path):
         """配置里写 human 时也必须被覆盖，否则会弹出 pygame 窗口。
 
         human 模式的 render() 只往 ImageViewer 推帧并返回 None，录制拿不到像素。
         """
         render_modes: list = []
-        runner_mod = _patch_play(monkeypatch, _make_env_factory(render_modes=render_modes))
+        session = _session(_make_env_factory(render_modes=render_modes))
         config = _play_config(tmp_path, levels=("SuperMarioBros-1-1-v0",))
 
-        runner_mod.play(config)
+        session.run(config)
 
-        assert render_modes == ["rgb_array"], "play 必须强制走 rgb_array"
+        assert render_modes == ["rgb_array"], "会话必须强制走 rgb_array"
 
-    def test_keyboard_interrupt_keeps_partial_video(self, tmp_path: Path, monkeypatch):
-        """Ctrl+C 中断时不该向外抛异常，且已录制的部分要保住。"""
+    def test_keyboard_interrupt_keeps_partial_video(self, tmp_path: Path):
+        """命令行入口消化 Ctrl+C，不外抛异常，且已录制的部分要保住。"""
         env = _FakeEnv(n_steps=100, interrupt_at=3)
-        runner_mod = _patch_play(monkeypatch, _make_env_factory(env=env))
+        session = _session(_make_env_factory(env=env))
         config = _play_config(tmp_path, levels=("SuperMarioBros-1-1-v0",))
 
-        runner_mod.play(config)   # 不应抛 KeyboardInterrupt
+        play(config, session=session)   # 不应抛 KeyboardInterrupt
 
         path = tmp_path / "videos" / "1-1.mp4"
         assert path.exists(), "中断前已录的帧必须落盘"
-        assert env.closed, "中断也要关掉环境"
         reader = iio.get_reader(path)
         try:
             assert reader.count_frames() >= 1
         finally:
             reader.close()
 
-    def test_none_frame_raises_clear_error(self, tmp_path: Path, monkeypatch):
+    def test_missing_checkpoint_logs_and_returns(self, tmp_path: Path, caplog):
+        """checkpoint 不存在时记一条错误、干净返回，不抛异常（spec：前置校验）。"""
+        config = _play_config(tmp_path, levels=("SuperMarioBros-1-1-v0",))
+        config.artifacts.checkpoint = tmp_path / "nope.zip"
+
+        with caplog.at_level("ERROR"):
+            _session(_make_env_factory()).run(config)
+
+        assert "checkpoint 不存在" in caplog.text
+        assert not (tmp_path / "videos").exists(), "没过校验就不该产任何视频"
+
+    def test_none_frame_raises_clear_error(self, tmp_path: Path):
         """包装器不透传 render() 时给出可读报错，而不是 imageio 的费解堆栈。"""
         env = _FakeEnv()
         env.render = lambda: None
-
-        runner_mod = _patch_play(monkeypatch, _make_env_factory(env=env))
+        session = _session(_make_env_factory(env=env))
         config = _play_config(tmp_path, levels=("SuperMarioBros-1-1-v0",))
 
         with pytest.raises(RuntimeError, match="rgb_array"):
-            runner_mod.play(config)
+            session.run(config)
+
+
+class TestInterruptSemantics:
+    """中断的接缝归属：run 冒泡（训练内嵌可停训练），play 吞掉（命令行安静退）。"""
+
+    def test_run_propagates_keyboard_interrupt(self, tmp_path: Path):
+        """训练内嵌的调用依赖中断冒泡——吞掉它，Ctrl+C 就停不了训练。"""
+        env = _FakeEnv(n_steps=100, interrupt_at=3)
+        session = _session(_make_env_factory(env=env))
+        config = _play_config(tmp_path, levels=("SuperMarioBros-1-1-v0",))
+
+        with pytest.raises(KeyboardInterrupt):
+            session.run(config)
+
+        assert (tmp_path / "videos" / "1-1.mp4").exists(), "中断前已录的帧必须落盘"
+
+    def test_play_logs_and_returns_quietly(self, tmp_path: Path, caplog):
+        """命令行播放被 Ctrl+C 打断时：一条日志、没有堆栈、干净返回。"""
+        env = _FakeEnv(n_steps=100, interrupt_at=3)
+        session = _session(_make_env_factory(env=env))
+        config = _play_config(tmp_path, levels=("SuperMarioBros-1-1-v0",))
+
+        with caplog.at_level("INFO"):
+            play(config, session=session)
+
+        assert "播放被中断" in caplog.text
+        assert str(tmp_path / "videos") in caplog.text, "日志要指出视频在哪"
 
 
 class TestTimestampedVideoDir:
-    """play 命令的输出按时间分档：每播一次新开一个目录，谁也别覆盖谁。"""
+    """播放输出按时间分档：每播一次新开一个目录，谁也别覆盖谁。"""
 
-    def test_writes_into_a_timestamped_subdir(self, tmp_path: Path, monkeypatch):
-        runner_mod = _patch_play(monkeypatch, _make_env_factory())
+    def test_writes_into_a_timestamped_subdir(self, tmp_path: Path):
+        session = _session(_make_env_factory())
         config = _play_config(
             tmp_path, levels=("SuperMarioBros-1-1-v0",), timestamp_videos=True
         )
 
-        runner_mod.play(config)
+        session.run(config)
 
         video = _only_subdir(tmp_path / "videos") / "1-1.mp4"
         assert video.exists(), "视频应落在时间戳目录里"
 
-    def test_dir_name_looks_like_a_timestamp(self, tmp_path: Path, monkeypatch):
-        runner_mod = _patch_play(monkeypatch, _make_env_factory())
+    def test_dir_name_looks_like_a_timestamp(self, tmp_path: Path):
+        session = _session(_make_env_factory())
         config = _play_config(
             tmp_path, levels=("SuperMarioBros-1-1-v0",), timestamp_videos=True
         )
 
-        runner_mod.play(config)
+        session.run(config)
 
         name = _only_subdir(tmp_path / "videos").name
         # 形如 20260912_143022，或同秒重播时的 20260912_143022_2
         assert re.fullmatch(r"\d{8}_\d{6}(_\d+)?", name), f"目录名不像时间戳: {name}"
 
-    def test_each_play_keeps_its_own_copy(self, tmp_path: Path, monkeypatch):
+    def test_each_play_keeps_its_own_copy(self, tmp_path: Path):
         """连播两场不能互相覆盖——这正是分时间目录的全部意义。"""
-        runner_mod = _patch_play(monkeypatch, _make_env_factory())
+        session = _session(_make_env_factory())
         config = _play_config(
             tmp_path, levels=("SuperMarioBros-1-1-v0",), timestamp_videos=True
         )
 
-        runner_mod.play(config)
+        session.run(config)
         first = _only_subdir(tmp_path / "videos")
-        runner_mod.play(config)
+        session.run(config)
 
         dirs = sorted(p for p in (tmp_path / "videos").iterdir() if p.is_dir())
         assert len(dirs) == 2, f"两场播放应有两个目录，实际 {dirs}"
         assert (first / "1-1.mp4").exists(), "第一场的视频不该被第二场冲掉"
         assert all((d / "1-1.mp4").exists() for d in dirs)
 
-    def test_timestamps_under_a_custom_video_dir(self, tmp_path: Path, monkeypatch):
+    def test_timestamps_under_a_custom_video_dir(self, tmp_path: Path):
         """--video-dir 只是换个地方放，分档行为应保持一致。"""
         custom = tmp_path / "elsewhere"
-        runner_mod = _patch_play(monkeypatch, _make_env_factory())
+        session = _session(_make_env_factory())
         config = _play_config(
             tmp_path,
             levels=("SuperMarioBros-1-1-v0",),
@@ -421,25 +472,25 @@ class TestTimestampedVideoDir:
             timestamp_videos=True,
         )
 
-        runner_mod.play(config)
+        session.run(config)
 
         assert (_only_subdir(custom) / "1-1.mp4").exists()
 
-    def test_disabled_writes_flat(self, tmp_path: Path, monkeypatch):
+    def test_disabled_writes_flat(self, tmp_path: Path):
         """关掉分档时按老样子平铺，训练侧录 best 模型走的就是这条。"""
-        runner_mod = _patch_play(monkeypatch, _make_env_factory())
+        session = _session(_make_env_factory())
         config = _play_config(
             tmp_path, levels=("SuperMarioBros-1-1-v0",), timestamp_videos=False
         )
 
-        runner_mod.play(config)
+        session.run(config)
 
         assert (tmp_path / "videos" / "1-1.mp4").exists()
         assert not [p for p in (tmp_path / "videos").iterdir() if p.is_dir()], (
             "关掉分档时不该再有子目录"
         )
 
-    def test_play_command_defaults_to_timestamped(self, tmp_path: Path, monkeypatch):
+    def test_play_command_defaults_to_timestamped(self, tmp_path: Path):
         """从真实命令行参数出发，确认默认确实是分档的。
 
         别的测试都直接写 SimpleNamespace，唯独这里走一遍 argparse → config，
@@ -463,8 +514,7 @@ class TestTimestampedVideoDir:
             )
         )
 
-        runner_mod = _patch_play(monkeypatch, _make_env_factory())
-        runner_mod.play(config)
+        _session(_make_env_factory()).run(config)
 
         assert (_only_subdir(tmp_path / "videos") / "1-1.mp4").exists()
 
@@ -531,15 +581,15 @@ class TestVideoFilename:
 class TestSampleRuns:
     """--sample N：抽 N 个探索率，每个概率把全部关卡各播一遍。"""
 
-    def test_each_run_is_filed_under_its_rate(self, tmp_path: Path, monkeypatch):
+    def test_each_run_is_filed_under_its_rate(self, tmp_path: Path):
         """每个概率一个目录，目录里是干净的关卡文件名。"""
         models: list[_FakeModel] = []
-        runner_mod = _patch_play(monkeypatch, _make_env_factory(), models=models)
+        session = _session(_make_env_factory(), models=models)
         config = _play_config(
             tmp_path, levels=("SuperMarioBros-1-1-v0",), sample_runs=1
         )
 
-        runner_mod.play(config)
+        session.run(config)
 
         paths = _relative_videos(tmp_path / "videos")
         assert len(paths) == 1
@@ -547,47 +597,47 @@ class TestSampleRuns:
         # 目录名必须就是这一遍实际用的值，不能各写各的
         assert {paths[0].split("/")[0]} == _drawn_dirs(models)
 
-    def test_greedy_keeps_the_plain_filename(self, tmp_path: Path, monkeypatch):
+    def test_greedy_keeps_the_plain_filename(self, tmp_path: Path):
         """贪心没有探索率可言，既不套目录也不改名字。"""
-        runner_mod = _patch_play(monkeypatch, _make_env_factory())
+        session = _session(_make_env_factory())
         config = _play_config(tmp_path, levels=("SuperMarioBros-1-1-v0",))
 
-        runner_mod.play(config)
+        session.run(config)
 
         assert (tmp_path / "videos" / "1-1.mp4").exists()
 
-    def test_each_run_draws_its_own_rate(self, tmp_path: Path, monkeypatch):
+    def test_each_run_draws_its_own_rate(self, tmp_path: Path):
         """N 遍抽 N 个不同的概率——这才是 --sample N 的意义所在。
 
         若改回"同一个 ε 重复 N 遍"，三遍的 rates_used 会全部相同，这里就会红。
         """
         models: list[_FakeModel] = []
-        runner_mod = _patch_play(monkeypatch, _make_env_factory(), models=models)
+        session = _session(_make_env_factory(), models=models)
         config = _play_config(
             tmp_path, levels=("SuperMarioBros-1-1-v0",), sample_runs=3
         )
 
-        runner_mod.play(config)
+        session.run(config)
 
         rates = _calls_across(models, "rates_used")
         assert len(set(rates)) == 3, f"三遍该抽三个不同的探索率，实际用到 {set(rates)}"
 
-    def test_each_run_keeps_its_own_video(self, tmp_path: Path, monkeypatch):
+    def test_each_run_keeps_its_own_video(self, tmp_path: Path):
         """三遍三个文件，一个都不能少——概率不同，目录本就撞不上。"""
         models: list[_FakeModel] = []
-        runner_mod = _patch_play(monkeypatch, _make_env_factory(), models=models)
+        session = _session(_make_env_factory(), models=models)
         config = _play_config(
             tmp_path, levels=("SuperMarioBros-1-1-v0",), sample_runs=3
         )
 
-        runner_mod.play(config)
+        session.run(config)
 
         paths = _relative_videos(tmp_path / "videos")
         assert len(paths) == 3, f"三遍应留三个文件，实际 {paths}"
         assert {p.split("/")[0] for p in paths} == _drawn_dirs(models)
 
     def test_drawn_rate_stays_within_twice_the_checkpoint_rate(
-        self, tmp_path: Path, monkeypatch
+        self, tmp_path: Path
     ):
         """抽样范围是 [0, 2×checkpoint 的探索率]，均值仍落在原值上。
 
@@ -595,12 +645,12 @@ class TestSampleRuns:
         模型的水平了。
         """
         models: list[_FakeModel] = []
-        runner_mod = _patch_play(monkeypatch, _make_env_factory(), models=models)
+        session = _session(_make_env_factory(), models=models)
         config = _play_config(
             tmp_path, levels=("SuperMarioBros-1-1-v0",), sample_runs=8
         )
 
-        runner_mod.play(config)
+        session.run(config)
 
         rates = _calls_across(models, "rates_used")
         assert rates, "应至少采样过一次"
@@ -609,56 +659,57 @@ class TestSampleRuns:
         )
         assert len(set(rates)) > 1, "每一遍都该是一个新的抽样值"
 
-    def test_zero_rate_warns_that_nothing_varies(self, tmp_path: Path, monkeypatch, caplog):
+    def test_zero_rate_warns_that_nothing_varies(self, tmp_path: Path, caplog):
         """探索率衰减到 0 的模型抽不出随机性，得说一声而不是静默地重播。"""
         model = _FakeModel()
         model.exploration_rate = 0.0
-        runner_mod = _patch_play(monkeypatch, _make_env_factory(), model=model)
+        session = _session(_make_env_factory(), model=model)
         config = _play_config(
             tmp_path, levels=("SuperMarioBros-1-1-v0",), sample_runs=2
         )
 
         with caplog.at_level("WARNING"):
-            runner_mod.play(config)
+            session.run(config)
 
         assert "抽不出任何随机性" in caplog.text
 
-    def test_missing_rate_warns_and_still_records(self, tmp_path: Path, monkeypatch, caplog):
+    def test_missing_rate_warns_and_still_records(self, tmp_path: Path, caplog):
         """拿不到探索率（非 DQN 模型）时只告警，不能把录制备份丢掉。"""
         model = _FakeModel()
         model.exploration_rate = float("nan")
-        runner_mod = _patch_play(monkeypatch, _make_env_factory(), model=model)
+        session = _session(_make_env_factory(), model=model)
         config = _play_config(
             tmp_path, levels=("SuperMarioBros-1-1-v0",), sample_runs=2
         )
 
         with caplog.at_level("WARNING"):
-            runner_mod.play(config)
+            session.run(config)
 
         assert "抽不出任何随机性" in caplog.text
         # 没有探索率可依，两遍只能平铺在同一层，兜底要保证它们都留得下来
         assert _relative_videos(tmp_path / "videos") == ["1-1.mp4", "1-1_2.mp4"]
 
-    def test_each_run_resets_the_same_env(self, tmp_path: Path, monkeypatch):
+    def test_each_run_resets_the_same_env(self, tmp_path: Path):
         """同一关的各遍复用同一个 env：建环境很贵，reset() 本来就会重开一局。
 
         环境复用是串行播放才有的账——并发那条路每趟各建一个环境给线程用，
         见 TestParallelPlay。这里塞个窗口把播放按回串行。
         """
         envs: list[_FakeEnv] = []
-        runner_mod = _patch_play(monkeypatch, _make_env_factory(envs=envs))
-        _force_window(monkeypatch, runner_mod)
+        window_kwargs: dict = {}
+        _force_window(window_kwargs)
+        session = _session(_make_env_factory(envs=envs), **window_kwargs)
         config = _play_config(
             tmp_path, levels=("SuperMarioBros-1-1-v0",), sample_runs=3
         )
 
-        runner_mod.play(config)
+        session.run(config)
 
         assert len(envs) == 1, "一个关卡只该建一个环境"
         assert envs[0].resets == 3, "每遍开始都要 reset"
         assert envs[0].closed
 
-    def test_one_rate_covers_every_level(self, tmp_path: Path, monkeypatch):
+    def test_one_rate_covers_every_level(self, tmp_path: Path):
         """一个概率套用到全部关卡：同一个目录里装着这一遍打出的所有关卡。
 
         这是"抽 N 个概率、每个概率播一遍"的直接体现——目录的含义是"在这个随机
@@ -666,15 +717,16 @@ class TestSampleRuns:
         """
         model = _FakeModel()
         envs: list[_FakeEnv] = []
-        runner_mod = _patch_play(monkeypatch, _make_env_factory(envs=envs), model=model)
-        _force_window(monkeypatch, runner_mod)
+        window_kwargs: dict = {}
+        _force_window(window_kwargs)
+        session = _session(_make_env_factory(envs=envs), model=model, **window_kwargs)
         config = _play_config(
             tmp_path,
             levels=("SuperMarioBros-1-1-v0", "SuperMarioBros-1-2-v0"),
             sample_runs=2,
         )
 
-        runner_mod.play(config)
+        session.run(config)
 
         paths = _relative_videos(tmp_path / "videos")
         assert len(paths) == 4, f"两个概率各播两关应为 4 个文件，实际 {paths}"
@@ -686,15 +738,15 @@ class TestSampleRuns:
             assert f"{dirname}/1-2.mp4" in paths
         assert len(envs) == 2, "每个关卡各建一个环境，关内各遍复用"
 
-    def test_every_run_samples(self, tmp_path: Path, monkeypatch):
+    def test_every_run_samples(self, tmp_path: Path):
         """N 遍都得走采样，不能只有第一遍采样、后面退回贪心。"""
         models: list[_FakeModel] = []
-        runner_mod = _patch_play(monkeypatch, _make_env_factory(), models=models)
+        session = _session(_make_env_factory(), models=models)
         config = _play_config(
             tmp_path, levels=("SuperMarioBros-1-1-v0",), sample_runs=3
         )
 
-        runner_mod.play(config)
+        session.run(config)
 
         calls = _calls_across(models, "deterministic_calls")
         assert calls, "应至少推理过一次"
@@ -722,76 +774,79 @@ class TestUniquePath:
 class TestSampleActions:
     """--sample：贪心策略配固定初始状态时每次播放都逐帧相同，采样才会走出新轨迹。"""
 
-    def test_defaults_to_greedy(self, tmp_path: Path, monkeypatch):
+    def test_defaults_to_greedy(self, tmp_path: Path):
         """默认必须还是看这个模型最好的表现，不能被采样悄悄改掉。"""
         model = _FakeModel()
-        runner_mod = _patch_play(monkeypatch, _make_env_factory(), model=model)
+        session = _session(_make_env_factory(), model=model)
         config = _play_config(tmp_path, levels=("SuperMarioBros-1-1-v0",))
 
-        runner_mod.play(config)
+        session.run(config)
 
         assert model.deterministic_calls, "应至少推理过一次"
         assert all(model.deterministic_calls), "默认应全程贪心"
 
-    def test_sample_flag_switches_to_epsilon_greedy(self, tmp_path: Path, monkeypatch):
+    def test_sample_flag_switches_to_epsilon_greedy(self, tmp_path: Path):
         """--sample 要真的改推理方式，而不只是配置里多一个字段。"""
         models: list[_FakeModel] = []
-        runner_mod = _patch_play(monkeypatch, _make_env_factory(), models=models)
+        session = _session(_make_env_factory(), models=models)
         config = _play_config(
             tmp_path, levels=("SuperMarioBros-1-1-v0",), sample_runs=1
         )
 
-        runner_mod.play(config)
+        session.run(config)
 
         calls = _calls_across(models, "deterministic_calls")
         assert calls, "应至少推理过一次"
         assert not any(calls), "开采样后每一步都该走 ε-greedy"
 
-    def test_logs_the_exploration_rate(self, tmp_path: Path, monkeypatch, caplog):
+    def test_logs_the_exploration_rate(self, tmp_path: Path, caplog):
         """采样强度取决于 checkpoint 里的探索率，可能是 1.0；不写出来没法排查。"""
-        runner_mod = _patch_play(monkeypatch, _make_env_factory())
+        session = _session(_make_env_factory())
         config = _play_config(
             tmp_path, levels=("SuperMarioBros-1-1-v0",), sample_runs=1
         )
 
         with caplog.at_level("INFO"):
-            runner_mod.play(config)
+            session.run(config)
 
         assert "0.198" in caplog.text, "应把作为均值的 exploration_rate 记录下来"
         assert "0.396" in caplog.text, "抽样上界（2×均值）也要写出来"
         assert "探索率=" in caplog.text, "每一遍实际用到多少，得逐遍记下来"
 
-    def _make_load_reseeding_to_42(self, monkeypatch, runner_mod, model):
-        """让假 DQN.load 复刻真实行为：按存档里的 seed 重播全局 numpy。
+    def _make_loader_reseeding_to_42(self, model):
+        """复刻真实 DQN.load 的行为：按存档里的 seed 重播全局 numpy。
 
         存档 data 里存着 seed=42，BaseAlgorithm.__init__ 会拿它调用
         set_random_seed。这不加复刻的话，单进程内连跑两次本来就序列不同，
         这个 bug 根本测不出来——它只在"另起一个进程"时现形。
         """
 
-        def _load(*args, **kwargs):
+        def _load(path):
             np.random.seed(42)
             return model
 
-        monkeypatch.setattr(runner_mod, "DQN", SimpleNamespace(load=_load))
+        return _load
 
-    def test_each_fresh_load_still_samples_differently(self, tmp_path: Path, monkeypatch):
+    def test_each_fresh_load_still_samples_differently(self, tmp_path: Path):
         """核心承诺：另跑一次命令要能看到另一种打法。
 
         这里每次都把种子按回 42（等价于另起一个进程加载模型），播两场必须
         走出不同的采样序列，否则 --sample 只是换了个说法的重播。
         """
         model = _FakeModel()
-        runner_mod = _patch_play(monkeypatch, _make_env_factory(), model=model)
-        self._make_load_reseeding_to_42(monkeypatch, runner_mod, model)
+        session = PlaybackSession(
+            load_model=self._make_loader_reseeding_to_42(model),
+            make_env=_make_env_factory(),
+            open_viewer=lambda play_config: None,
+        )
         config = _play_config(
             tmp_path, levels=("SuperMarioBros-1-1-v0",), sample_runs=1
         )
 
-        runner_mod.play(config)
+        session.run(config)
         first = list(model.sampled)
         model.sampled.clear()
-        runner_mod.play(config)
+        session.run(config)
 
         assert first, "应至少采样过一次"
         assert first != model.sampled, (
@@ -806,21 +861,20 @@ class TestSampleActions:
         """
         seeded: list = []
         monkeypatch.setattr(np.random, "seed", lambda *args: seeded.append(args))
-        runner_mod = _patch_play(monkeypatch, _make_env_factory())
+        session = _session(_make_env_factory())
         config = _play_config(tmp_path, levels=("SuperMarioBros-1-1-v0",))
 
-        runner_mod.play(config)
+        session.run(config)
 
         assert seeded == [], "没开采样时不该重新播种"
 
 
 class TestPlayViewer:
-    """实时显示窗口的接线：窗口用假的，只验开关、生命周期与关窗语义。"""
+    """实时显示窗口的接线：走生产 _open_viewer，只 patch 它的环境依赖。"""
 
     def _patch_viewer(
         self,
         monkeypatch,
-        runner_mod,
         viewers: list[_FakeViewer],
         close_after: int | None = None,
     ):
@@ -832,29 +886,34 @@ class TestPlayViewer:
         monkeypatch.setattr(runner_mod, "FrameViewer", _make_viewer)
         monkeypatch.setattr(runner_mod, "is_gui_available", lambda: True)
 
+    def _viewer_session(self, env_factory):
+        """用生产 _open_viewer 的会话：开不开窗由配置与图形环境共同决定。"""
+        return PlaybackSession(
+            load_model=_model_loader(),
+            make_env=env_factory,
+        )
+
     def test_no_show_does_not_open_window(self, tmp_path: Path, monkeypatch):
         """--no-show 时完全不该碰 matplotlib。"""
-        runner_mod = _patch_play(monkeypatch, _make_env_factory())
         monkeypatch.setattr(runner_mod, "is_gui_available", lambda: True)
         monkeypatch.setattr(
             runner_mod, "FrameViewer", lambda *a, **k: pytest.fail("不该创建窗口")
         )
         config = _play_config(tmp_path, levels=("SuperMarioBros-1-1-v0",), show=False)
 
-        runner_mod.play(config)
+        self._viewer_session(_make_env_factory()).run(config)
 
         assert (tmp_path / "videos" / "1-1.mp4").exists()
 
     def test_show_opens_one_window_and_closes_it(self, tmp_path: Path, monkeypatch):
         """整个播放过程只开一个窗口，结束时关掉，且帧确实送上屏幕。"""
         viewers: list[_FakeViewer] = []
-        runner_mod = _patch_play(monkeypatch, _make_env_factory())
-        self._patch_viewer(monkeypatch, runner_mod, viewers)
+        self._patch_viewer(monkeypatch, viewers)
         config = _play_config(
             tmp_path, levels=("SuperMarioBros-1-1-v0", "SuperMarioBros-1-2-v0"), show=True
         )
 
-        runner_mod.play(config)
+        self._viewer_session(_make_env_factory()).run(config)
 
         assert len(viewers) == 1, "两个关卡应复用同一个窗口"
         assert viewers[0].fps == 15, "节流节奏取自 --video-fps"
@@ -863,14 +922,13 @@ class TestPlayViewer:
 
     def test_falls_back_when_no_gui(self, tmp_path: Path, monkeypatch):
         """没有图形后端时降级为只录制，不能把整场播放拖垮。"""
-        runner_mod = _patch_play(monkeypatch, _make_env_factory())
         monkeypatch.setattr(runner_mod, "is_gui_available", lambda: False)
         monkeypatch.setattr(
             runner_mod, "FrameViewer", lambda *a, **k: pytest.fail("无后端时不该建窗口")
         )
         config = _play_config(tmp_path, levels=("SuperMarioBros-1-1-v0",), show=True)
 
-        runner_mod.play(config)
+        self._viewer_session(_make_env_factory()).run(config)
 
         assert (tmp_path / "videos" / "1-1.mp4").exists(), "降级后仍要产出视频"
 
@@ -878,13 +936,12 @@ class TestPlayViewer:
         """关窗即停止：不继续下一关，已录制的部分保留。"""
         env = _FakeEnv(n_steps=100)
         viewers: list[_FakeViewer] = []
-        runner_mod = _patch_play(monkeypatch, _make_env_factory(env=env))
-        self._patch_viewer(monkeypatch, runner_mod, viewers, close_after=1)
+        self._patch_viewer(monkeypatch, viewers, close_after=1)
         config = _play_config(
             tmp_path, levels=("SuperMarioBros-1-1-v0", "SuperMarioBros-1-2-v0"), show=True
         )
 
-        runner_mod.play(config)
+        self._viewer_session(_make_env_factory(env=env)).run(config)
 
         video_dir = tmp_path / "videos"
         assert (video_dir / "1-1.mp4").exists(), "关窗前已录的帧必须落盘"
@@ -896,33 +953,25 @@ class TestPlaybackThreads:
     """并发播放开几个线程：留一半核心给系统，也不能开得比活还多。"""
 
     def test_uses_half_the_cores(self, monkeypatch):
-        import mad_mario.playback.runner as runner_mod
-
         monkeypatch.setattr(runner_mod.os, "cpu_count", lambda: 24)
 
         assert _playback_threads() == 12
 
     def test_never_drops_below_one(self, monkeypatch):
         """单核机器照样得能播，只是谈不上并发。"""
-        import mad_mario.playback.runner as runner_mod
-
         monkeypatch.setattr(runner_mod.os, "cpu_count", lambda: 1)
 
         assert _playback_threads() == 1
 
     def test_survives_an_unknown_core_count(self, monkeypatch):
         """os.cpu_count() 允许返回 None，别在这里抛异常把整场播放带崩。"""
-        import mad_mario.playback.runner as runner_mod
-
         monkeypatch.setattr(runner_mod.os, "cpu_count", lambda: None)
 
         assert _playback_threads() == 1
 
 
-def _record_pool_size(monkeypatch, sizes: list[int], cap: int):
-    """把线程池开出来的 max_workers 记下来，并把线程数额度固定成 cap。"""
-    import mad_mario.playback.runner as runner_mod
-
+def _record_pool_size(monkeypatch, sizes: list[int]):
+    """把线程池开出来的 max_workers 记下来。线程额度由会话的协作者给定。"""
     real_pool = runner_mod.ThreadPoolExecutor
 
     def _pool(max_workers=None, **kwargs):
@@ -930,57 +979,56 @@ def _record_pool_size(monkeypatch, sizes: list[int], cap: int):
         return real_pool(max_workers=max_workers, **kwargs)
 
     monkeypatch.setattr(runner_mod, "ThreadPoolExecutor", _pool)
-    monkeypatch.setattr(runner_mod, "_playback_threads", lambda: cap)
 
 
 class TestParallelPlay:
     """--no-show 时的并发播放：真的同时在跑、每趟一个环境、每线程一份模型。"""
 
-    def test_playthroughs_really_overlap(self, tmp_path: Path, monkeypatch):
+    def test_playthroughs_really_overlap(self, tmp_path: Path):
         """三趟必须同时在跑，而不只是"派给了线程池"。
 
         每个环境在 reset 里卡在三人栅栏上，只有三个线程同时进到这里才会放行。
         退回串行（或线程数被调小）凑不齐人数，栅栏超时抛错，测试直接红。
         """
         barrier = threading.Barrier(3, timeout=10)
-        runner_mod = _patch_play(monkeypatch, _make_env_factory(barrier=barrier))
+        session = _session(_make_env_factory(barrier=barrier))
         config = _play_config(
             tmp_path, levels=("SuperMarioBros-1-1-v0",), sample_runs=3
         )
 
-        runner_mod.play(config)
+        session.run(config)
 
         assert len(_relative_videos(tmp_path / "videos")) == 3
 
-    def test_each_playthrough_builds_its_own_env(self, tmp_path: Path, monkeypatch):
+    def test_each_playthrough_builds_its_own_env(self, tmp_path: Path):
         """并发时环境按趟建：趟次分给哪个线程由调度决定，缓存环境就得处理跨线程
         的归属与收尾，为省一百多毫秒不值当。"""
         envs: list[_FakeEnv] = []
-        runner_mod = _patch_play(monkeypatch, _make_env_factory(envs=envs))
+        session = _session(_make_env_factory(envs=envs))
         config = _play_config(
             tmp_path,
             levels=("SuperMarioBros-1-1-v0", "SuperMarioBros-1-2-v0"),
         )
 
-        runner_mod.play(config)
+        session.run(config)
 
-        assert len(envs) == 2, f"两关各录一趟，该建两个环境，实际 {len(envs)}"
+        assert len(envs) == 2, f"两关各录一趟，该建两个环境，实际 {envs}"
         assert all(env.resets == 1 for env in envs), "一趟只 reset 一次"
         assert all(env.closed for env in envs), "每个环境都得收尾，不能漏关"
 
-    def test_every_worker_gets_its_own_model_copy(self, tmp_path: Path, monkeypatch):
+    def test_every_worker_gets_its_own_model_copy(self, tmp_path: Path):
         """一份模型只能被一个线程碰。
 
         DQN.predict 的 ε-greedy 现读 model.exploration_rate，而每一遍都要把它
         改成自己抽到的率；共用一个实例就会互相改写，目录名立刻变成假话。
         """
         models: list[_FakeModel] = []
-        runner_mod = _patch_play(monkeypatch, _make_env_factory(), models=models)
+        session = _session(_make_env_factory(), models=models)
         config = _play_config(
             tmp_path, levels=("SuperMarioBros-1-1-v0",), sample_runs=3
         )
 
-        runner_mod.play(config)
+        session.run(config)
 
         assert len({id(m) for m in models}) == len(models), "每次加载都该是新实例"
         used = [m for m in models if m.threads]
@@ -992,32 +1040,32 @@ class TestParallelPlay:
     def test_never_opens_more_threads_than_playthroughs(self, tmp_path: Path, monkeypatch):
         """活少就少开线程：两趟播放不该拉起十二个线程干等着。"""
         sizes: list[int] = []
-        _record_pool_size(monkeypatch, sizes, cap=12)
-        runner_mod = _patch_play(monkeypatch, _make_env_factory())
+        _record_pool_size(monkeypatch, sizes)
+        session = _session(_make_env_factory(), thread_count=lambda: 12)
         config = _play_config(
             tmp_path, levels=("SuperMarioBros-1-1-v0",), sample_runs=2
         )
 
-        runner_mod.play(config)
+        session.run(config)
 
         assert sizes == [2], f"两趟播放只该开两个线程，实际 {sizes}"
 
     def test_caps_workers_at_half_the_cores(self, tmp_path: Path, monkeypatch):
         """活多就按额度来，不能一趟一个线程地开下去。"""
         sizes: list[int] = []
-        _record_pool_size(monkeypatch, sizes, cap=3)
-        runner_mod = _patch_play(monkeypatch, _make_env_factory())
+        _record_pool_size(monkeypatch, sizes)
+        session = _session(_make_env_factory(), thread_count=lambda: 3)
         config = _play_config(
             tmp_path,
             levels=("SuperMarioBros-1-1-v0", "SuperMarioBros-1-2-v0"),
             sample_runs=2,
         )
 
-        runner_mod.play(config)
+        session.run(config)
 
         assert sizes == [3], f"四趟播放该受 3 个线程的额度限制，实际 {sizes}"
 
-    def test_a_broken_playthrough_is_not_swallowed(self, tmp_path: Path, monkeypatch):
+    def test_a_broken_playthrough_is_not_swallowed(self, tmp_path: Path):
         """线程里冒出来的异常必须带回主线程，否则会静默地少录几段视频。"""
 
         def _failing(config, render_mode=None, level_name=None):
@@ -1025,11 +1073,44 @@ class TestParallelPlay:
                 raise RuntimeError("第二关的环境建不出来")
             return _FakeEnv()
 
-        runner_mod = _patch_play(monkeypatch, _failing)
+        session = _session(_failing)
         config = _play_config(
             tmp_path,
             levels=("SuperMarioBros-1-1-v0", "SuperMarioBros-1-2-v0"),
         )
 
         with pytest.raises(RuntimeError, match="第二关的环境建不出来"):
-            runner_mod.play(config)
+            session.run(config)
+
+    def test_one_session_two_checkpoints_never_mixes_models(self, tmp_path: Path):
+        """会话级线程缓存必须按 checkpoint 区分。
+
+        训练侧的录制器会复用同一个会话先后跑两份最优模型；缓存若不认路径，
+        第二场视频里录的就是第一场的旧权重。
+        """
+        first, second = _FakeModel(), _FakeModel()
+        first.exploration_rate, second.exploration_rate = 0.1, 0.2
+        calls: list[str] = []
+        env_factory = _make_env_factory()
+
+        def _load(path):
+            name = "first" if "first" in str(path) else "second"
+            calls.append(name)
+            return first if name == "first" else second
+
+        session = PlaybackSession(
+            load_model=_load, make_env=env_factory, open_viewer=lambda pc: None,
+        )
+        base = tmp_path
+        for name in ("first.zip", "second.zip"):
+            (base / name).touch()
+            cfg = _play_config(base, levels=("SuperMarioBros-1-1-v0",), sample_runs=0)
+            cfg.artifacts.checkpoint = base / name
+            # 两个 checkpoint 在不同目录避免撞名，这里直接改 video_dir
+            cfg.play.video_dir = base / f"videos_{name}"
+            session.run(cfg)
+
+        assert calls.count("first") >= 1 and calls.count("second") >= 1
+        # 线程缓存命中时不得把 first 的权重喂给 second 的场次
+        assert calls.count("first") == 1, "first 只该加载一次（缓存命中）"
+        assert calls.count("second") == 1

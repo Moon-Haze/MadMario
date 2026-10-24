@@ -12,17 +12,20 @@ from stable_baselines3.common.monitor import Monitor
 from stable_baselines3.common.utils import LinearSchedule
 from stable_baselines3.common.vec_env import SubprocVecEnv
 
+from mad_mario.artifacts import resolve_checkpoint
 from mad_mario.config import (
     AppConfig,
     SB3Config,
     build_env_name,
-    compatible_save_root,
-    resolve_checkpoint,
 )
 from mad_mario.env.factory import make_mario_env
 from mad_mario.logging.metrics import MarioMetricsCallback
 from mad_mario.logging.setup import capture_stdout_to
-from mad_mario.training.best_playback import BestModelPlaybackCallback
+from mad_mario.training.best_playback import (
+    BestModelPlaybackCallback,
+    BestRunRecorder,
+    best_playback_config,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -232,8 +235,8 @@ def train(config: AppConfig, log_path: Path | None = None) -> None:
     )
 
     # 评估回调（SB3 内置的评估与日志逻辑），负责保存 best model，并在最优模型
-    # 刷新到够格时把它排进后台录制队列；--no-play-best 可关掉录制，评估本身
-    # 不受影响。刷新门槛见 --best-min-improvement
+    # 刷新到够格时委托录制器排后台视频；--no-play-best 时不建录制器，评估与
+    # 存档不受影响。刷新门槛见 --best-min-improvement
     eval_levels = _select_eval_levels(config)
     eval_env = SubprocVecEnv(
         [lambda thunk=thunk: Monitor(thunk()) for thunk in _make_eval_thunks(config)]
@@ -242,8 +245,14 @@ def train(config: AppConfig, log_path: Path | None = None) -> None:
         "评估覆盖 %d 个关卡（每关 %d 回合）：%s",
         len(eval_levels), config.artifacts.eval_episodes, ", ".join(eval_levels),
     )
+    recorder = (
+        BestRunRecorder(best_playback_config(config))
+        if config.play.play_on_best
+        else None
+    )
     eval_callback = BestModelPlaybackCallback(
         eval_env,
+        recorder=recorder,
         best_model_save_path=str(save_root / "best_model"),
         log_path=str(save_root / "eval_logs"),
         eval_freq=max(config.artifacts.eval_freq // config.artifacts.num_envs, 1),
@@ -252,7 +261,6 @@ def train(config: AppConfig, log_path: Path | None = None) -> None:
         deterministic=True,
         # verbose=0 静默评估打印；best model / eval_logs / tensorboard 记录不受影响
         verbose=0,
-        train_config=config,
         min_improvement=config.artifacts.best_min_improvement,
     )
 
@@ -291,6 +299,8 @@ def train(config: AppConfig, log_path: Path | None = None) -> None:
             logger.info("训练完成。")
     finally:
         # 后台录制线程还在往 mp4 里写：先等它把队列清空再收环境，否则进程带着
-        # 写了一半的文件退出，播放器连打开都打不开
-        eval_callback.wait_for_recording()
+        # 写了一半的文件退出，播放器连打开都打不开。这里是唯一的排水点——
+        # SB3 正常结束与 Ctrl+C 两条路都过这个 finally
+        if recorder is not None:
+            recorder.drain()
         env.close()

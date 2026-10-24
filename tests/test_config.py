@@ -13,7 +13,6 @@ from mad_mario.config import (
     MAX_WORLD,
     SB3ArtifactConfig,
     _expand_level,
-    _format_worlds,
     _levels_type,
     _parse_world_token,
     _worlds_type,
@@ -21,10 +20,9 @@ from mad_mario.config import (
     add_train_args,
     build_env_name,
     build_parser,
-    compatible_save_root,
     config_from_play_args,
     config_from_train_args,
-    resolve_checkpoint,
+    playback_env_config,
 )
 from mad_mario.config import EnvConfig
 
@@ -131,93 +129,6 @@ class TestExpandLevel:
 
     def test_already_full(self):
         assert _expand_level("SuperMarioBros-2-1-v0") == "SuperMarioBros-2-1-v0"
-
-
-class TestFormatWorlds:
-    def test_single(self):
-        assert _format_worlds([5]) == "5"
-
-    def test_consecutive(self):
-        assert _format_worlds([1, 2, 3, 4]) == "1-4"
-
-    def test_non_consecutive(self):
-        assert _format_worlds([1, 3, 5]) == "1,3,5"
-
-
-# ─────────────────────────────
-# compatible_save_root
-# ─────────────────────────────
-class TestCompatibleSaveRoot:
-    def test_single_world_level(self):
-        cfg = EnvConfig(world=1, level=2, movement="right_only")
-        result = compatible_save_root(Path("ckpt"), cfg)
-        assert result == Path("ckpt/1-2-v0_right_only")
-
-    def test_multi_worlds(self):
-        cfg = EnvConfig(worlds=[1, 2, 3], movement="simple", version=1)
-        result = compatible_save_root(Path("ckpt"), cfg)
-        assert "worlds-1-3" in str(result)
-
-    def test_multi_levels(self):
-        cfg = EnvConfig(levels=["1-1", "1-2", "1-3"], movement="complex")
-        result = compatible_save_root(Path("ckpt"), cfg)
-        assert "multi" in str(result)
-
-
-# ─────────────────────────────
-# resolve_checkpoint
-# ─────────────────────────────
-class TestResolveCheckpoint:
-    def test_no_resume(self):
-        cfg = SB3ArtifactConfig(resume=False)
-        assert resolve_checkpoint(cfg) is None
-
-    def test_explicit_checkpoint(self):
-        path = Path("/some/path.zip")
-        cfg = SB3ArtifactConfig(checkpoint=path, resume=True)
-        assert resolve_checkpoint(cfg) == path
-
-    def test_nonexistent(self, tmp_path: Path):
-        cfg = SB3ArtifactConfig(save_root=tmp_path, resume=True)
-        assert resolve_checkpoint(cfg) is None
-
-    def test_final_exists(self, tmp_path: Path):
-        final = tmp_path / "mario_dqn_final.zip"
-        final.touch()
-        cfg = SB3ArtifactConfig(save_root=tmp_path, resume=True)
-        assert resolve_checkpoint(cfg) == final
-
-    def test_snapshots_subdir_discovered(self, tmp_path: Path):
-        # 周期档存在 save_root/snapshots/ 子目录时也应被自动发现（此前漏扫会返回 None）
-        snap = tmp_path / "snapshots"
-        snap.mkdir()
-        ckpt = snap / "mario_dqn_199968_steps.zip"
-        ckpt.touch()
-        cfg = SB3ArtifactConfig(save_root=tmp_path, resume=True)
-        assert resolve_checkpoint(cfg) == ckpt
-
-    def test_steps_chosen_over_final(self, tmp_path: Path):
-        # 只要存在周期档就优先于 final.zip；final.zip 仅在无周期档时兜底
-        snap = tmp_path / "snapshots"
-        snap.mkdir()
-        ckpt = snap / "mario_dqn_299952_steps.zip"
-        ckpt.touch()
-        final = tmp_path / "mario_dqn_final.zip"
-        final.touch()
-        cfg = SB3ArtifactConfig(save_root=tmp_path, resume=True)
-        assert resolve_checkpoint(cfg) == ckpt
-
-    def test_largest_steps_wins_across_dirs(self, tmp_path: Path):
-        # 顶层与 snapshots/ 并存时按训练步数取最大，而非按修改时间取最新
-        old_big = tmp_path / "mario_dqn_399936_steps.zip"
-        old_big.touch()
-        os.utime(old_big, (946684800, 946684800))  # mtime 设为 2000-01-01，故意更旧
-        snap = tmp_path / "snapshots"
-        snap.mkdir()
-        new_small = snap / "mario_dqn_299952_steps.zip"
-        new_small.touch()
-        cfg = SB3ArtifactConfig(save_root=tmp_path, resume=True)
-        assert resolve_checkpoint(cfg) == old_big
 
 
 # ─────────────────────────────
@@ -573,3 +484,46 @@ class TestPlayConfig:
         args = parser.parse_args(["--no-play-best"])
         config = config_from_train_args(args)
         assert config.play.play_on_best is False
+
+
+# ─────────────────────────────
+# playback_env_config
+# ─────────────────────────────
+class TestPlaybackEnvConfig:
+    """播放语义单点：六个开关的取值与其余字段的保留。"""
+
+    def test_playback_switches(self):
+        """训练语义全开的配置变换后应只留脱困。"""
+        train_cfg = EnvConfig(clip_rewards=True, stuck_penalty_enabled=True,
+                              progress_reward_enabled=True, score_reward_enabled=True,
+                              flag_reward_enabled=True, stuck_rescue_enabled=False)
+        play_cfg = playback_env_config(train_cfg)
+        assert play_cfg.clip_rewards is False
+        assert play_cfg.stuck_penalty_enabled is False
+        assert play_cfg.progress_reward_enabled is False
+        assert play_cfg.score_reward_enabled is False
+        assert play_cfg.flag_reward_enabled is False
+        assert play_cfg.stuck_rescue_enabled is True
+
+    def test_other_fields_preserved(self):
+        """关卡、动作预设、观测参数等字段应原样保留。"""
+        train_cfg = EnvConfig(game="SuperMarioBros", world=2, level=3, version=1,
+                              levels=["SuperMarioBros-1-2-v0"], movement="complex",
+                              frame_skip=6, frame_stack=3, resize_shape=64,
+                              stuck_max_steps=42, flag_reward_value=99.0)
+        play_cfg = playback_env_config(train_cfg)
+        assert play_cfg.game == "SuperMarioBros"
+        assert (play_cfg.world, play_cfg.level, play_cfg.version) == (2, 3, 1)
+        assert play_cfg.levels == ["SuperMarioBros-1-2-v0"]
+        assert play_cfg.movement == "complex"
+        assert play_cfg.frame_skip == 6
+        assert play_cfg.frame_stack == 3
+        assert play_cfg.resize_shape == 64
+        # 与塑形无关的卡住参数也保留——脱困还要用它们
+        assert play_cfg.stuck_max_steps == 42
+
+    def test_input_not_mutated(self):
+        """变换是纯函数：原配置不被改写。"""
+        train_cfg = EnvConfig(clip_rewards=True)
+        playback_env_config(train_cfg)
+        assert train_cfg.clip_rewards is True

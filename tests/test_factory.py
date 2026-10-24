@@ -53,6 +53,20 @@ class TestMakeMarioEnv:
         finally:
             env.close()
 
+    def test_default_render_mode_is_safe_for_training(self):
+        """训练 thunk 不显式传 render_mode：构造与步进必须照常，无渲染副作用。
+
+        这是删除 EnvConfig.render_mode 兜底字段的对照验证——工厂的默认
+        render_mode 直传 gym，训练路径此前就一直走 None，行为不应有变。
+        """
+        env = make_mario_env(EnvConfig())
+        try:
+            obs, _ = env.reset()
+            _, reward, terminated, truncated, _ = env.step(0)
+            assert obs.shape == (4, 84, 84)
+        finally:
+            env.close()
+
     def test_info_contains_position(self):
         """info 应包含位置信息。"""
         env = make_mario_env()

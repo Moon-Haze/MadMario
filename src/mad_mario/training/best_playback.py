@@ -1,4 +1,9 @@
-"""最优模型刷新时，自动把它的表现录成视频。"""
+"""最优模型刷新时，自动把它的表现录成视频。
+
+门槛与存档归 BestModelPlaybackCallback（评估回调），排程与后台执行归
+BestRunRecorder（enqueue + drain）：两个概念、一个文件——"最优"相关的
+知识聚在一起，接缝上只传递显式的录制请求，不再透传整棵训练配置。
+"""
 
 from __future__ import annotations
 
@@ -13,8 +18,8 @@ from typing import NamedTuple
 
 from stable_baselines3.common.callbacks import EvalCallback
 
-from mad_mario.config import AppConfig, PlayConfig, SB3ArtifactConfig
-from mad_mario.playback.runner import play
+from mad_mario.config import AppConfig, PlayConfig, SB3ArtifactConfig, playback_env_config
+from mad_mario.playback.runner import PlaybackSession
 
 logger = logging.getLogger(__name__)
 
@@ -33,33 +38,23 @@ class _RecordingJob(NamedTuple):
     video_dir: Path
 
 
-def _to_playback_config(train_config: AppConfig, best_model_path: Path, video_dir: Path) -> AppConfig:
-    """把训练配置改造成"只录制、不弹窗"的播放配置。
+def best_playback_config(train_config: AppConfig) -> AppConfig:
+    """由训练配置生成最优录制的播放配置模板。
 
-    播放的语义是观赏，不是继续训练：关掉全部奖励塑形与卡住惩罚，但保留脱困
-    挣扎（否则模型卡住时画面会一直僵着）。渲染模式由 play() 自己强制成
-    rgb_array，这里不用管。
+    播放的语义是观赏，不是继续训练：塑形与惩罚全关、脱困保留——这套取值由
+    playback_env_config 单点定义。这里要展示的是这个最优模型的最好表现，
+    贪心；训练途中弹窗会打断使用者，也可能根本没有显示器；目录已按步数分好
+    档，再套时间戳只会让路径变长。checkpoint 与 video_dir 按次填入（见
+    BestRunRecorder._drain_jobs），模板里留空。
     """
-    env_config = replace(
-        train_config.env,
-        clip_rewards=False,
-        stuck_penalty_enabled=False,
-        stuck_rescue_enabled=True,
-        progress_reward_enabled=False,
-        score_reward_enabled=False,
-        flag_reward_enabled=False,
-    )
     return AppConfig(
-        env=env_config,
+        env=playback_env_config(train_config.env),
         sb3=train_config.sb3,
-        artifacts=SB3ArtifactConfig(checkpoint=best_model_path),
+        artifacts=SB3ArtifactConfig(save_root=train_config.artifacts.save_root),
         play=PlayConfig(
-            video_dir=video_dir,
             video_fps=train_config.play.video_fps,
-            show=False,          # 训练途中弹窗会打断使用者，也可能根本没有显示器
-            # 目录已按步数分好档，再套时间戳只会让路径变长而不多出任何信息
+            show=False,
             timestamp_videos=False,
-            # 这里要展示的是这个最优模型的最好表现，贪心；采样留给命令行播放
             sample_runs=0,
         ),
     )
@@ -93,67 +88,48 @@ def _clears_the_bar(previous_best: float, current: float, min_improvement: float
     return current >= previous_best + abs(previous_best) * min_improvement
 
 
-class BestModelPlaybackCallback(EvalCallback):
-    """评估回调；最优模型刷新到够格时，存档并排队录成视频。
+class BestRunRecorder:
+    """把"录制这个最优模型"排进后台队列，训练收尾时一次排干。
 
-    直接继承 EvalCallback，而不是另起一个回调去盯 best_model.zip 的改动：最优
-    与否只有 EvalCallback 自己知道（best_mean_reward），从外部轮询只能靠比对
-    文件时间戳，既要在每步做 stat，又会漏掉同一时间戳内的连续刷新。
-
-    两处偏离父类的默认行为，都是为了让"最优"这两个字更有含金量：
-
-    - **抬高门槛**：父类是评估值高一点点就刷新，于是评估噪声的每个小波峰都要
-      存一次盘、录一次视频。这里要求比已采纳的最优高出一个比例才算数。
-    - **录制移到后台**：一趟要跑遍全部关卡、逐步渲染加编码，就地跑完等于把
-      主循环按在那儿等，评估间隔被拉长好几倍。
+    interface 就两个方法：enqueue 在主线程调用（模型快照必须在此之前复制
+    好——见 _snapshot_model），drain 在训练结束时调用一次、幂等。录什么由
+    构造时给定的播放配置模板决定（best_playback_config 的产物），每趟只按
+    任务填 checkpoint 与 video_dir，训练超参树不进这道接缝。
     """
 
-    def __init__(
-        self,
-        *args,
-        train_config: AppConfig,
-        best_model_save_path: str | Path | None = None,
-        min_improvement: float = 0.05,
-        **kwargs,
-    ):
-        # 不把 best_model_save_path 交给父类：它的逻辑是"高一点就存"，与这里的
-        # 门槛冲突。路径仍由调用方用同一个参数给出，只是存档时机改由我们掌握。
-        super().__init__(*args, best_model_save_path=None, **kwargs)
-        self._train_config = train_config
-        self._video_root = Path(train_config.artifacts.save_root) / BEST_VIDEO_DIRNAME
-        self._best_model_dir = Path(best_model_save_path) if best_model_save_path else None
-        self._min_improvement = min_improvement
-
+    def __init__(self, playback_config: AppConfig, session_factory=None):
+        self._playback_config = playback_config
+        # 每趟现造一个会话：线程级的模型缓存不跨任务串味
+        self._session_factory = session_factory or PlaybackSession
+        self.video_root = Path(playback_config.artifacts.save_root) / BEST_VIDEO_DIRNAME
         self._jobs: queue.Queue = queue.Queue()
         self._worker: threading.Thread | None = None
         # 收尾只做一次：叫停之后不再接新任务，也不重复投收工信号
         self._stopped = False
         self._lock = threading.Lock()
 
-    def _on_step(self) -> bool:
-        # 父类只在评估且成绩变好时抬高 best_mean_reward，所以前后比一次就能
-        # 确定"本次评估刷新了最优"，不必自己复刻它的评估逻辑
-        previous_best = self.best_mean_reward
-        keep_training = super()._on_step()
+    def enqueue(self, step: int, checkpoint: Path, video_dir: Path) -> bool:
+        """把任务交给后台线程；已经叫停过就返回 False。"""
+        with self._lock:
+            if self._stopped:
+                return False
+            if self._worker is None:
+                # 不是守护线程：进程退出时 Python 会先等它收尾，别让半截 mp4
+                # 留在磁盘上。惰性启动，没开录制就不白养一个线程
+                self._worker = threading.Thread(
+                    target=self._drain_jobs, name="best-model-playback", daemon=False
+                )
+                self._worker.start()
+            self._jobs.put(_RecordingJob(step, checkpoint, video_dir))
+            return True
 
-        if self.best_mean_reward > previous_best:
-            if _clears_the_bar(previous_best, self.best_mean_reward, self._min_improvement):
-                self._adopt_best(previous_best)
-            else:
-                # 提升没过门槛，这次不算刷新。把标准退回去，否则它会一路漂到
-                # 评估噪声的波峰上，之后真实的进步反而再也够不着
-                self.best_mean_reward = previous_best
-
-        return keep_training
-
-    def _on_training_end(self) -> None:
-        self.wait_for_recording()
-
-    def wait_for_recording(self, timeout: float | None = None) -> None:
+    def drain(self, timeout: float | None = None) -> None:
         """等后台把排队的视频录完再返回；幂等，正常结束与 Ctrl+C 都走这里。
 
         不这么等一等，进程会带着写了一半的 mp4 退出——mp4 的索引写在文件末尾，
-        半截文件连播放器都打不开，同一趟里先录好的几关也跟着废掉。
+        半截文件连播放器都打不开，同一趟里先录好的几关也跟着废掉。训练的
+        finally 是唯一排水点：SB3 正常结束会回调 _on_training_end，Ctrl+C 时
+        却不会，两处各写一遍必然漏掉其中一条路。
         """
         with self._lock:
             worker = self._worker
@@ -172,65 +148,9 @@ class BestModelPlaybackCallback(EvalCallback):
             logger.info("等待后台录制完成（还有 %d 趟未录）...", pending)
         worker.join(timeout)
         if worker.is_alive():
-            logger.warning("后台录制未在超时内结束；已录好的视频保留在 %s", self._video_root)
-
-    # ── 存档与录制 ──
-
-    def _adopt_best(self, previous_best: float) -> None:
-        """存档这个够格的最优模型，并把它排进后台录制队列。"""
-        best_path = self._save_best_model()
-        logger.info(
-            "最优模型已刷新（步数=%d，评估奖励=%.1f%s）→ %s",
-            self.num_timesteps, self.best_mean_reward,
-            "" if not math.isfinite(previous_best)
-            else f"，较上次 +{self.best_mean_reward - previous_best:.1f}",
-            best_path if best_path is not None else "未配置存档目录",
-        )
-        if best_path is not None and self._train_config.play.play_on_best:
-            self._record_best(best_path)
-
-    def _save_best_model(self) -> Path | None:
-        """把当前模型存成 best_model.zip；没配目录就只当评估回调使。"""
-        if self._best_model_dir is None:
-            return None
-        self._best_model_dir.mkdir(parents=True, exist_ok=True)
-        path = self._best_model_dir / "best_model.zip"
-        self.model.save(str(path))
-        return path
-
-    def _record_best(self, best_path: Path) -> None:
-        """把"录制这个最优模型"排进后台队列，立刻返回让训练继续。
-
-        复制快照这一步留在主线程：它必须发生在 best_model.zip 被下一次刷新覆盖
-        之前，交给后台就等于把这份文件交出去任人涂改。
-        """
-        # 带上步数，这样多次刷新留下的视频能按训练阶段对比着看
-        video_dir = self._video_root / f"step_{self.num_timesteps:09d}"
-        try:
-            checkpoint = _snapshot_model(best_path, video_dir)
-        except OSError as exc:
-            logger.warning("复制最优模型失败（%s），跳过本次录制", exc)
-            return
-
-        if not self._enqueue(_RecordingJob(self.num_timesteps, checkpoint, video_dir)):
-            logger.warning("录制队列已收工，跳过本次录制（步数=%d）", self.num_timesteps)
-            return
-        logger.info("已排队录制（步数=%d）→ %s", self.num_timesteps, video_dir)
-
-    def _enqueue(self, job: _RecordingJob) -> bool:
-        """把任务交给后台线程；已经叫停过就返回 False。"""
-        with self._lock:
-            if self._stopped:
-                return False
-            if self._worker is None:
-                # 不是守护线程：进程退出时 Python 会先等它收尾，别让半截 mp4
-                # 留在磁盘上。惰性启动，没开录制就不白养一个线程
-                self._worker = threading.Thread(
-                    target=self._drain_jobs, name="best-model-playback", daemon=False
-                )
-                self._worker.start()
-            self._jobs.put(job)
-            return True
+            logger.warning(
+                "后台录制未在超时内结束；已录好的视频保留在 %s", self.video_root
+            )
 
     def _drain_jobs(self) -> None:
         """后台线程主体：按排队顺序一趟一趟地录，录完一个再取下一个。
@@ -244,11 +164,109 @@ class BestModelPlaybackCallback(EvalCallback):
                 return
             logger.info("后台开始录制（步数=%d）→ %s", job.step, job.video_dir)
             try:
-                play(
-                    _to_playback_config(self._train_config, job.checkpoint, job.video_dir),
-                    # 信号只会送到主线程，这里吞不吞中断没有区别；真要停训练是
-                    # 主线程的事，后台这一趟录完自己就结束了
-                    catch_interrupt=False,
+                job_config = AppConfig(
+                    env=self._playback_config.env,
+                    sb3=self._playback_config.sb3,
+                    artifacts=replace(
+                        self._playback_config.artifacts, checkpoint=job.checkpoint
+                    ),
+                    play=replace(self._playback_config.play, video_dir=job.video_dir),
                 )
+                # 信号只会送到主线程，这里的会话不吞中断也没有区别；真要停训练
+                # 是主线程的事，后台这一趟录完自己就结束了
+                self._session_factory().run(job_config)
             except Exception as exc:
-                logger.warning("录制最优模型视频失败（步数=%d，%s），继续录后面的", job.step, exc)
+                logger.warning(
+                    "录制最优模型视频失败（步数=%d，%s），继续录后面的", job.step, exc
+                )
+
+
+class BestModelPlaybackCallback(EvalCallback):
+    """评估回调；最优模型刷新到够格时，存档并委托录制器排后台视频。
+
+    直接继承 EvalCallback，而不是另起一个回调去盯 best_model.zip 的改动：最优
+    与否只有 EvalCallback 自己知道（best_mean_reward），从外部轮询只能靠比对
+    文件时间戳，既要在每步做 stat，又会漏掉同一时间戳内的连续刷新。
+
+    两处偏离父类的默认行为，都是为了让"最优"这两个字更有含金量：
+
+    - **抬高门槛**：父类是评估值高一点点就刷新，于是评估噪声的每个小波峰都要
+      存一次盘、录一次视频。这里要求比已采纳的最优高出一个比例才算数。
+    - **录制委托出去**：排程、后台线程与收尾排水都在 BestRunRecorder 里，
+      回调只决定"这次够不够格、录哪一档"。
+    """
+
+    def __init__(
+        self,
+        *args,
+        recorder: BestRunRecorder | None = None,
+        best_model_save_path: str | Path | None = None,
+        min_improvement: float = 0.05,
+        **kwargs,
+    ):
+        # 不把 best_model_save_path 交给父类：它的逻辑是"高一点就存"，与这里的
+        # 门槛冲突。路径仍由调用方用同一个参数给出，只是存档时机改由我们掌握。
+        super().__init__(*args, best_model_save_path=None, **kwargs)
+        # recorder 为 None 即 --no-play-best：评估照常、存档照常，只是不录视频
+        self._recorder = recorder
+        self._best_model_dir = Path(best_model_save_path) if best_model_save_path else None
+        self._min_improvement = min_improvement
+
+    def _on_step(self) -> bool:
+        # 父类只在评估且成绩变好时抬高 best_mean_reward，所以前后比一次就能
+        # 确定"本次评估刷新了最优"，不必自己复刻它的评估逻辑
+        previous_best = self.best_mean_reward
+        keep_training = super()._on_step()
+
+        if self.best_mean_reward > previous_best:
+            if _clears_the_bar(previous_best, self.best_mean_reward, self._min_improvement):
+                self._adopt_best(previous_best)
+            else:
+                # 提升没过门槛，这次不算刷新。把标准退回去，否则它会一路漂到
+                # 评估噪声的波峰上，之后真实的进步反而再也够不着
+                self.best_mean_reward = previous_best
+
+        return keep_training
+
+    # ── 存档与录制 ──
+
+    def _adopt_best(self, previous_best: float) -> None:
+        """存档这个够格的最优模型，并把它交给录制器。"""
+        best_path = self._save_best_model()
+        logger.info(
+            "最优模型已刷新（步数=%d，评估奖励=%.1f%s）→ %s",
+            self.num_timesteps, self.best_mean_reward,
+            "" if not math.isfinite(previous_best)
+            else f"，较上次 +{self.best_mean_reward - previous_best:.1f}",
+            best_path if best_path is not None else "未配置存档目录",
+        )
+        if best_path is not None and self._recorder is not None:
+            self._record_best(best_path)
+
+    def _save_best_model(self) -> Path | None:
+        """把当前模型存成 best_model.zip；没配目录就只当评估回调使。"""
+        if self._best_model_dir is None:
+            return None
+        self._best_model_dir.mkdir(parents=True, exist_ok=True)
+        path = self._best_model_dir / "best_model.zip"
+        self.model.save(str(path))
+        return path
+
+    def _record_best(self, best_path: Path) -> None:
+        """复制快照并排队录制，立刻返回让训练继续。
+
+        复制快照这一步留在主线程：它必须发生在 best_model.zip 被下一次刷新覆盖
+        之前，交给后台就等于把这份文件交出去任人涂改。
+        """
+        # 带上步数，这样多次刷新留下的视频能按训练阶段对比着看
+        video_dir = self._recorder.video_root / f"step_{self.num_timesteps:09d}"
+        try:
+            checkpoint = _snapshot_model(best_path, video_dir)
+        except OSError as exc:
+            logger.warning("复制最优模型失败（%s），跳过本次录制", exc)
+            return
+
+        if not self._recorder.enqueue(self.num_timesteps, checkpoint, video_dir):
+            logger.warning("录制队列已收工，跳过本次录制（步数=%d）", self.num_timesteps)
+            return
+        logger.info("已排队录制（步数=%d）→ %s", self.num_timesteps, video_dir)

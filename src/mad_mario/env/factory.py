@@ -15,8 +15,13 @@ MOVEMENT_ACTIONS = {
 
 
 def make_mario_env(config: EnvConfig | None = None, render_mode=None, level_name: str | None = None):
+    """组装马里奥环境：render_mode 与关卡由调用方显式给出，配置只管栈。
+
+    不传 render_mode 即环境默认（训练路径不渲染）；播放录制路径显式传
+    rgb_array。曾经有一个 EnvConfig.render_mode 字段兜底，但唯一会写它的
+    CLI 旋钮又被播放路径无条件覆盖——假旋钮，删了。
+    """
     config = config or EnvConfig()
-    render_mode = config.render_mode if render_mode is None else render_mode
 
     if level_name:
         env_name = level_name
