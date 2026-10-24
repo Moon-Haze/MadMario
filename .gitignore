@@ -6,3 +6,5 @@ video/
 .history/
 .claude/
 src/madmario.egg-info/
+.mimosa/
+.zcodeignore
